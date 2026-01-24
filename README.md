@@ -11,23 +11,44 @@ It is part of the [QWED Ecosystem](https://github.com/QWED-AI).
 
 ### 1. 🛡️ IamGuard (Implemented)
 Verifies AWS IAM Policies using the **Z3 Theorem Prover**.
-Instead of regex matching, it converts policies into logical formulas to prove reachability.
-
-- **Wildcard Support:** Handles `s3:*`, `arn:aws:s3:::bucket/*` correctly.
+- **Wildcard Logic:** `s3:*`, `bucket/*`.
+- **Conditions:** `aws:SourceIp` (CIDR), `aws:CurrentTime` (Date), `StringLike` (Patterns).
 - **Deny Overrides:** Proves that explicit Deny statements always override Allows.
-- **Least Privilege:** Mathematically proves if a policy allows stronger permissions than intended.
 
 ### 2. 🌐 NetworkGuard (Implemented)
 Verifies Network Reachability using Graph Theory.
-- "Can the Public Internet reach the Database Subnet on Port 5432?" -> **False** (Proven by Graph Traversal).
 - **Public Access:** Checks Routes (IGW) + Security Group Ingress (0.0.0.0/0).
 
 ### 3. 💰 CostGuard (Implemented)
 Deterministic Cloud Cost estimation before deployment.
-- Prevents AI Agents from provisioning expensive instances (e.g., `p4d.24xlarge`) without approval.
-- **Static Pricing:** Uses an embedded pricing catalog (USD) for standard AWS instance types.
+- **GPU Control:** Detects expensive instances like `p4d.24xlarge`.
 
 ## 📦 Installation
+...
+
+## ⚡ Usage (Real World)
+
+### Parsing Terraform Directory
+
+```python
+from qwed_infra import TerraformParser, IamGuard 
+
+# 1. Parse real .tf files
+parser = TerraformParser()
+resources = parser.parse_directory("./terraform/prod")
+
+# 2. Verify IAM Policies
+guard = IamGuard()
+for policy in resources.get("policies", []):
+    # Verify Context-Aware Access (e.g. VPN Only)
+    result = guard.verify_access(
+        policy, 
+        action="s3:GetObject", 
+        resource="*",
+        context={"aws:SourceIp": "192.168.1.5"} # Corporate VPN
+    )
+    print(f"Policy {policy['id']} allows VPN? {result.allowed}")
+```
 ...
 ### Verifying Cloud Costs
 
