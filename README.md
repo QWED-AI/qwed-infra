@@ -1,4 +1,5 @@
 # qwed-infra
+<<<<<<< HEAD
 
 **Deterministic Verification for Infrastructure as Code (IaC)**
 
@@ -85,3 +86,6 @@ We welcome contributions! Please see `CONTRIBUTING.md`.
 ## 📄 License
 
 Apache 2.0
+=======
+Deterministic Verification for Infrastructure as Code (IaC). Prove security of Terraform, Kubernetes, and AWS IAM policies using Z3 Solvers and Graph Theory to prevent misconfiguration and cost overruns.
+>>>>>>> 42fb586ba3ca93303bcd89d1ebe494ab36ce184c
