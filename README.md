@@ -132,9 +132,9 @@ print(f"Internet Reachable? {res.reachable}") # -> True
 ```mermaid
 graph TD
     A[Terraform Code] -->|TerraformParser| B{QWED Engine}
-    B -->|Mathematical Proof| C[Z3 Solver (IAM)]
-    B -->|Graph Traversal| D[NetworkX (Reachability)]
-    B -->|Arithmetic| E[Pricing Catalog (Cost)]
+    B -->|Mathematical Proof| C["Z3 Solver (IAM)"]
+    B -->|Graph Traversal| D["NetworkX (Reachability)"]
+    B -->|Arithmetic| E["Pricing Catalog (Cost)"]
     C --> F[Verification Result]
     D --> F
     E --> F
