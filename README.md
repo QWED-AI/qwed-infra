@@ -22,11 +22,35 @@ Verifies Network Reachability using Graph Theory.
 - "Can the Public Internet reach the Database Subnet on Port 5432?" -> **False** (Proven by Graph Traversal).
 - **Public Access:** Checks Routes (IGW) + Security Group Ingress (0.0.0.0/0).
 
-### 3. 💰 CostGuard (Planned)
+### 3. 💰 CostGuard (Implemented)
 Deterministic Cloud Cost estimation before deployment.
 - Prevents AI Agents from provisioning expensive instances (e.g., `p4d.24xlarge`) without approval.
+- **Static Pricing:** Uses an embedded pricing catalog (USD) for standard AWS instance types.
 
 ## 📦 Installation
+...
+### Verifying Cloud Costs
+
+```python
+from qwed_infra import CostGuard
+
+cost = CostGuard()
+
+# Infrastructure resource list
+resources = {
+    "instances": [
+        {"id": "web-cluster", "instance_type": "t3.micro", "count": 2}, # Low cost
+        {"id": "gpu-trainer", "instance_type": "p4d.24xlarge", "count": 1} # EXPENSIVE!
+    ]
+}
+
+# 1. Budget Check
+result = cost.verify_budget(resources, budget_monthly=500.0)
+
+print(f"Within Budget? {result.within_budget}") # -> False
+print(f"Total: ${result.total_monthly_cost:.2f}") # -> ~$23,900
+print(f"Reason: {result.reason}")
+```
 ...
 ### Verifying Network Reachability
 
