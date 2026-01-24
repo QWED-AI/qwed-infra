@@ -17,15 +17,54 @@ Instead of regex matching, it converts policies into logical formulas to prove r
 - **Deny Overrides:** Proves that explicit Deny statements always override Allows.
 - **Least Privilege:** Mathematically proves if a policy allows stronger permissions than intended.
 
-### 2. 🌐 NetworkGuard (Planned)
+### 2. 🌐 NetworkGuard (Implemented)
 Verifies Network Reachability using Graph Theory.
 - "Can the Public Internet reach the Database Subnet on Port 5432?" -> **False** (Proven by Graph Traversal).
+- **Public Access:** Checks Routes (IGW) + Security Group Ingress (0.0.0.0/0).
 
 ### 3. 💰 CostGuard (Planned)
 Deterministic Cloud Cost estimation before deployment.
 - Prevents AI Agents from provisioning expensive instances (e.g., `p4d.24xlarge`) without approval.
 
 ## 📦 Installation
+...
+### Verifying Network Reachability
+
+```python
+from qwed_infra import NetworkGuard
+
+net_guard = NetworkGuard()
+
+# A mock infrastructure definition (simplified)
+infra = {
+    "subnets": [
+        {"id": "subnet-public", "security_groups": ["sg-web"]},
+        {"id": "subnet-private", "security_groups": ["sg-db"]}
+    ],
+    "route_tables": [
+        {
+            "subnet_id": "subnet-public", 
+            "routes": {"0.0.0.0/0": "igw-main"} # Route to Internet
+        },
+        {
+            "subnet_id": "subnet-private", 
+            "routes": {} # No routes out
+        }
+    ],
+    "security_groups": {
+        "sg-web": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+        "sg-db":  {"ingress": [{"port": 5432, "cidr": "10.0.0.0/16"}]}
+    }
+}
+
+# 1. Check Public Web Access
+res = net_guard.verify_reachability(infra, "internet", "subnet-public", 80)
+print(f"Web Accessible? {res.reachable}") # -> True
+
+# 2. Check Database Exposure
+res = net_guard.verify_reachability(infra, "internet", "subnet-private", 5432)
+print(f"DB Exposed? {res.reachable}") # -> False (No Route)
+```
 
 ```bash
 pip install qwed-infra
