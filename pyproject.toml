@@ -1,0 +1,31 @@
+[project]
+name = "qwed-infra"
+version = "0.1.0"
+description = "Deterministic Verification for Infrastructure as Code (IaC) using Z3 and Graph Theory."
+authors = [
+    {name = "QWED Team", email = "rahul@qwedai.com"},
+]
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "z3-solver>=4.12.0",
+    "networkx>=3.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+    "python-hcl2>=4.3.0",  # For parsing Terraform
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qwed_infra"]
