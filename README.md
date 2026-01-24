@@ -1,3 +1,5 @@
+<div align="center">
+
 # ☁️ QWED-Infra
 **Deterministic Verification for Infrastructure as Code (IaC)**
 
@@ -7,6 +9,8 @@
 [![PyPI](https://img.shields.io/pypi/v/qwed-infra?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/qwed-infra/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+
+</div>
 
 ---
 
