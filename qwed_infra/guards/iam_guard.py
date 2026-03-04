@@ -21,11 +21,13 @@ class IamGuard:
     def __init__(self):
         self.solver = Solver()
         
-    def verify_access(self, policy: Dict[str, Any], action: str, resource: str, context: Dict[str, Any] = {}) -> VerificationResult:
+    def verify_access(self, policy: Dict[str, Any], action: str, resource: str, context: Optional[Dict[str, Any]] = None) -> VerificationResult:
         """
         Check if the given policy allows the specific action on the resource, given the context.
         Context examples: {"aws:SourceIp": "192.168.1.5", "aws:CurrentTime": "2025-01-01T12:00:00Z"}
         """
+        if context is None:
+            context = {}
         try:
             # Simple Z3 model of IAM logic
             s_action = String('action')
@@ -90,8 +92,10 @@ class IamGuard:
                                  prefix_part = cidr_base.rsplit('.', 1)[0] + "." # Simplistic
                                  if mask == "8": prefix_part = cidr_base.split('.')[0] + "."
                                  cond_expr = And(cond_expr, match_constraint(StringVal(ctx_val), prefix_part + "*"))
-                             else:
-                                 cond_expr = And(cond_expr, StringVal(ctx_val) == StringVal(required_val))
+                        elif operator == "NotIpAddress":
+                             if ctx_val is None: return False
+                             # Block if IP matches a denied range
+                             cond_expr = And(cond_expr, StringVal(ctx_val) != StringVal(required_val))
                                  
                         elif operator == "DateLessThan":
                             if ctx_val is None: return False

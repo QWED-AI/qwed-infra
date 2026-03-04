@@ -101,15 +101,27 @@ class NetworkGuard:
                     rule_cidr = rule.get("cidr")
                     
                     port_match = (rule_port == port) or (rule_port == -1) # -1 is ALL
-                    cidr_match = (rule_cidr == "0.0.0.0/0")
+                    cidr_match = (rule_cidr == "0.0.0.0/0" or rule_cidr == "::/0")
                     
                     if port_match and cidr_match:
                         ingress_allowed = True
                         break
                 if ingress_allowed: break
         else:
-            # Internal Traffic logic (TODO)
-            ingress_allowed = True # Assume internal open for v0.1
+            # Internal Traffic: Also enforce SG rules for internal sources
+            for sg_id in target_sgs:
+                rules = security_groups.get(sg_id, {}).get("ingress", [])
+                for rule in rules:
+                    rule_port = rule.get("port")
+                    port_match = (rule_port == port) or (rule_port == -1)
+                    if port_match:
+                        ingress_allowed = True
+                        break
+                if ingress_allowed:
+                    break
+            # If no security groups attached, deny by default (fail-secure)
+            if not target_sgs:
+                ingress_allowed = False
             
         if not ingress_allowed:
              return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}")
