@@ -1,6 +1,7 @@
 import pytest
 from qwed_infra.parsers.terraform_parser import TerraformParser
 import os
+from unittest.mock import patch, mock_open
 
 @pytest.fixture
 def parser():
@@ -85,3 +86,30 @@ class TestNormalizeResource:
         result = parser._normalize_resource("aws_security_group", "sg_web", {"ingress": []})
         assert result is None
 
+    @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
+    def test_parse_directory_hcl2_error(self, mock_hcl2_load, parser, tmp_path):
+        # Create a dummy .tf file in a temporary directory
+        tf_file = tmp_path / "bad.tf"
+        tf_file.write_text("invalid hcl")
+        
+        # Configure the mock to raise an exception
+        mock_hcl2_load.side_effect = Exception("Mocked HCL parsing error")
+        
+        # Call parse_directory, it should catch the exception and return empty resources
+        resources = parser.parse_directory(str(tmp_path))
+        
+        # Verify it handled the error gracefully and returned the empty schema
+        assert resources["instances"] == []
+        assert resources["policies"] == []
+
+    def test_aws_iam_policy_normalization_error(self, parser):
+        # Create an object that raises an exception when isinstance() checks its __class__
+        class ExplodingPolicy:
+            @property
+            def __class__(self):
+                raise Exception("Mocked IAM normalization error")
+        
+        result = parser._normalize_resource("aws_iam_policy", "bad_policy", {"policy": ExplodingPolicy()})
+        
+        # Should catch the exception and return None
+        assert result is None
