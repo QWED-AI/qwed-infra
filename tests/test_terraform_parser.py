@@ -1,7 +1,7 @@
 import pytest
 from qwed_infra.parsers.terraform_parser import TerraformParser
 import os
-from unittest.mock import patch, mock_open
+from unittest.mock import patch
 
 @pytest.fixture
 def parser():
