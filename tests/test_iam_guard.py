@@ -107,7 +107,7 @@ class TestNonOctetCidr:
 
     def test_ip_address_slash12_out_of_range(self, guard):
         # 10.200.1.1 is outside 10.0.0.0/12 (covers only 10.0–10.15)
-        result = guard._apply_ip_address("10.200.1.1", "10.0.0.0/12", True)
+        guard._apply_ip_address("10.200.1.1", "10.0.0.0/12", True)
         import ipaddress
         assert ipaddress.ip_address("10.200.1.1") not in ipaddress.ip_network("10.0.0.0/12", strict=False)
 
