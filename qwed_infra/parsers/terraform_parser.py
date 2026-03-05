@@ -1,6 +1,5 @@
 import hcl2
-import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 
 class TerraformParser:
@@ -90,8 +89,9 @@ class TerraformParser:
                         "Statement": statements # Placeholder until we implement JSON string parser
                     }
                 }
-            except:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                print(f"Failed to normalize aws_iam_policy '{res_name}': {exc}")
+                return None
 
         # --- Storage ---
         if res_type == "aws_ebs_volume":

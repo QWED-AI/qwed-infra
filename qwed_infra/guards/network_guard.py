@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any
 import networkx as nx
 from pydantic import BaseModel
 
@@ -77,7 +77,6 @@ class NetworkGuard:
             
         # 3. Check Security Groups (Firewall Logic)
         # simplified: check destination ingress
-        dest_node = resources.get("subnets", []) # simplistic lookup
         target_sgs = []
         
         # Find dest subnet definition
