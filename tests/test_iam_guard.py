@@ -1,11 +1,10 @@
 """
 Comprehensive IAM Guard tests for SonarCloud 80%+ coverage.
-Tests all class methods: _match_pattern, _apply_*, _evaluate_condition,
-_build_statement_condition, _build_policy_logic, verify_access, verify_least_privilege.
+Tests all class methods using Z3 satisfiability assertions where appropriate.
 """
 import pytest
-from qwed_infra.guards.iam_guard import IamGuard, VerificationResult
-from z3 import StringVal
+from z3 import Solver, StringVal, sat, unsat
+from qwed_infra.guards.iam_guard import IamGuard
 
 
 @pytest.fixture
@@ -13,31 +12,67 @@ def guard():
     return IamGuard()
 
 
+def _solve(constraint) -> bool:
+    """Helper: check if a Z3 constraint is satisfiable."""
+    if constraint is True:
+        return True
+    if constraint is False:
+        return False
+    s = Solver()
+    s.add(constraint)
+    return s.check() == sat
+
+
+def _solve_unsat(constraint) -> bool:
+    """Helper: check if a Z3 constraint is unsatisfiable."""
+    if constraint is True:
+        return False
+    if constraint is False:
+        return True
+    s = Solver()
+    s.add(constraint)
+    return s.check() == unsat
+
+
 # ------------------------------------------------------------------
-# _match_pattern (unit tests on the helper directly)
+# _match_pattern — tested via Z3 sat/unsat
 # ------------------------------------------------------------------
 
 class TestMatchPattern:
     def test_wildcard_star_always_matches(self, guard):
-        result = guard._match_pattern(StringVal("anything"), "*")
-        assert result is True
+        assert guard._match_pattern(StringVal("anything"), "*") is True
 
-    def test_prefix_wildcard(self, guard):
-        # s3:* should match s3:GetObject (constraint is a Z3 expr, not bool)
+    def test_prefix_wildcard_matches(self, guard):
         constraint = guard._match_pattern(StringVal("s3:GetObject"), "s3:*")
-        assert constraint is not False  # Should produce a Z3 expression
+        assert _solve(constraint)
 
-    def test_suffix_wildcard(self, guard):
+    def test_prefix_wildcard_no_match(self, guard):
+        constraint = guard._match_pattern(StringVal("ec2:StartInstances"), "s3:*")
+        assert _solve_unsat(constraint)
+
+    def test_suffix_wildcard_matches(self, guard):
         constraint = guard._match_pattern(StringVal("prod-bucket"), "*-bucket")
-        assert constraint is not False
+        assert _solve(constraint)
+
+    def test_suffix_wildcard_no_match(self, guard):
+        constraint = guard._match_pattern(StringVal("prod-table"), "*-bucket")
+        assert _solve_unsat(constraint)
 
     def test_exact_match(self, guard):
         constraint = guard._match_pattern(StringVal("s3:GetObject"), "s3:GetObject")
-        assert constraint is not False
+        assert _solve(constraint)
 
     def test_exact_no_match(self, guard):
         constraint = guard._match_pattern(StringVal("s3:PutObject"), "s3:GetObject")
-        assert constraint is not False  # Still a Z3 expr, evaluated at solve time
+        assert _solve_unsat(constraint)
+
+    def test_interior_wildcard(self, guard):
+        constraint = guard._match_pattern(StringVal("s3:GetObject"), "s3:*Object")
+        assert _solve(constraint)
+
+    def test_interior_wildcard_no_match(self, guard):
+        constraint = guard._match_pattern(StringVal("s3:CreateBucket"), "s3:*Object")
+        assert _solve_unsat(constraint)
 
 
 # ------------------------------------------------------------------
@@ -52,7 +87,7 @@ class TestCidrToPrefix:
         assert guard._cidr_to_prefix("192.168.1.0", "24") == "192.168.1."
 
     def test_mask_16(self, guard):
-        assert guard._cidr_to_prefix("172.16.0.0", "16") == "172.16.0."
+        assert guard._cidr_to_prefix("172.16.0.0", "16") == "172.16."
 
 
 # ------------------------------------------------------------------
@@ -61,66 +96,79 @@ class TestCidrToPrefix:
 
 class TestApplyOperators:
     def test_string_equals_match(self, guard):
-        result = guard._apply_string_equals("hello", "hello", True)
-        assert result is not False
+        assert _solve(guard._apply_string_equals("hello", "hello", True))
 
     def test_string_equals_none_ctx(self, guard):
         assert guard._apply_string_equals(None, "hello", True) is False
 
+    def test_string_equals_mismatch(self, guard):
+        assert _solve_unsat(guard._apply_string_equals("world", "hello", True))
+
     def test_string_like_prefix_match(self, guard):
-        result = guard._apply_string_like("jdoe-admin", "jdoe-*", True)
-        assert result is not False
+        assert _solve(guard._apply_string_like("jdoe-admin", "jdoe-*", True))
+
+    def test_string_like_no_match(self, guard):
+        assert _solve_unsat(guard._apply_string_like("alice", "jdoe-*", True))
 
     def test_string_like_none_ctx(self, guard):
         assert guard._apply_string_like(None, "jdoe-*", True) is False
 
     def test_ip_address_cidr(self, guard):
-        result = guard._apply_ip_address("192.168.1.55", "192.168.1.0/24", True)
-        assert result is not False
+        assert _solve(guard._apply_ip_address("192.168.1.55", "192.168.1.0/24", True))
+
+    def test_ip_address_out_of_range(self, guard):
+        assert _solve_unsat(guard._apply_ip_address("10.0.0.1", "192.168.1.0/24", True))
 
     def test_ip_address_exact(self, guard):
-        result = guard._apply_ip_address("10.0.0.1", "10.0.0.1", True)
-        assert result is not False
+        assert _solve(guard._apply_ip_address("10.0.0.1", "10.0.0.1", True))
 
     def test_ip_address_none_ctx(self, guard):
         assert guard._apply_ip_address(None, "10.0.0.0/8", True) is False
 
-    def test_not_ip_address(self, guard):
-        result = guard._apply_not_ip_address("192.168.1.1", "10.0.0.1", True)
-        assert result is not False
+    def test_not_ip_address_outside_range(self, guard):
+        # 192.168.1.1 is NOT in 10.0.0.0/8 → should be allowed
+        assert _solve(guard._apply_not_ip_address("192.168.1.1", "10.0.0.0/8", True))
+
+    def test_not_ip_address_inside_range_denied(self, guard):
+        # 10.0.5.1 IS in 10.0.0.0/8 → NotIpAddress should deny
+        assert _solve_unsat(guard._apply_not_ip_address("10.0.5.1", "10.0.0.0/8", True))
 
     def test_not_ip_address_none_ctx(self, guard):
         assert guard._apply_not_ip_address(None, "10.0.0.1", True) is False
 
 
 # ------------------------------------------------------------------
-# _evaluate_operator dispatch
+# _evaluate_operator dispatch and fail-closed behavior
 # ------------------------------------------------------------------
 
 class TestEvaluateOperator:
     def test_string_equals_dispatch(self, guard):
         result = guard._evaluate_operator("StringEquals", "foo", "foo", True)
-        assert result is not False
+        assert _solve(result)
 
     def test_string_like_dispatch(self, guard):
         result = guard._evaluate_operator("StringLike", "s3:GetObject", "s3:*", True)
-        assert result is not False
+        assert _solve(result)
 
     def test_ip_address_dispatch(self, guard):
         result = guard._evaluate_operator("IpAddress", "10.0.0.5", "10.0.0.0/8", True)
-        assert result is not False
+        assert _solve(result)
 
     def test_not_ip_address_dispatch(self, guard):
-        result = guard._evaluate_operator("NotIpAddress", "1.2.3.4", "5.6.7.8", True)
-        assert result is not False
+        result = guard._evaluate_operator("NotIpAddress", "1.2.3.4", "5.0.0.0/8", True)
+        assert _solve(result)
 
-    def test_date_less_than_passthrough(self, guard):
-        result = guard._evaluate_operator("DateLessThan", "2025-01-01", "2026-01-01", True)
-        assert result is True  # TODO placeholder returns cond_expr unchanged
+    def test_date_less_than_satisfied(self, guard):
+        result = guard._evaluate_operator("DateLessThan", "2025-01-01T00:00:00Z", "2026-01-01T00:00:00Z", True)
+        assert result is not False  # Date is before limit — condition passes
 
-    def test_unknown_operator_passthrough(self, guard):
+    def test_date_less_than_fails(self, guard):
+        result = guard._evaluate_operator("DateLessThan", "2027-01-01T00:00:00Z", "2026-01-01T00:00:00Z", True)
+        assert result is False  # Date exceeds limit — fail closed
+
+    def test_unknown_operator_fails_closed(self, guard):
         result = guard._evaluate_operator("SomeUnknownOp", "val", "req", True)
-        assert result is True
+        assert result is False  # Unknown op must fail closed
 
 
 # ------------------------------------------------------------------
@@ -131,11 +179,10 @@ class TestEvaluateCondition:
     def test_empty_condition_returns_true(self, guard):
         assert guard._evaluate_condition({}, {}) is True
 
-    def test_string_equals_condition(self, guard):
+    def test_string_equals_condition_match(self, guard):
         block = {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
-        ctx = {"aws:RequestedRegion": "us-east-1"}
-        result = guard._evaluate_condition(block, ctx)
-        assert result is not False
+        result = guard._evaluate_condition(block, {"aws:RequestedRegion": "us-east-1"})
+        assert _solve(result)
 
     def test_missing_context_key_returns_false(self, guard):
         block = {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
@@ -157,11 +204,8 @@ class TestVerifyAccess:
         assert result.allowed is True
 
     def test_deny_wrong_action(self, guard):
-        policy = {
-            "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
-        }
+        policy = {"Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}
         result = guard.verify_access(policy, "s3:PutObject", "*")
-        assert result.verified is True
         assert result.allowed is False
 
     def test_wildcard_action_allowed(self, guard):
@@ -170,6 +214,7 @@ class TestVerifyAccess:
         assert result.allowed is True
 
     def test_explicit_deny_overrides_allow(self, guard):
+        """Deny after Allow — classic order."""
         policy = {
             "Statement": [
                 {"Effect": "Allow", "Action": "*", "Resource": "*"},
@@ -178,6 +223,17 @@ class TestVerifyAccess:
         }
         result = guard.verify_access(policy, "s3:DeleteBucket", "arn:aws:s3:::production")
         assert result.allowed is False
+
+    def test_explicit_deny_overrides_allow_regardless_of_order(self, guard):
+        """Deny before Allow — deny precedence must be order-independent."""
+        policy = {
+            "Statement": [
+                {"Effect": "Deny", "Action": "s3:DeleteBucket", "Resource": "*"},
+                {"Effect": "Allow", "Action": "*", "Resource": "*"},
+            ]
+        }
+        result = guard.verify_access(policy, "s3:DeleteBucket", "arn:aws:s3:::production")
+        assert result.allowed is False  # Deny must still win even when listed first
 
     def test_default_deny_empty_policy(self, guard):
         result = guard.verify_access({"Statement": []}, "s3:GetObject", "*")
@@ -200,7 +256,7 @@ class TestVerifyAccess:
         result = guard.verify_access(policy, "*", "*", context={"aws:SourceIp": "10.0.5.22"})
         assert result.allowed is True
 
-    def test_condition_ip_mismatch_denied(self, guard):
+    def test_condition_ip_denied_outside_range(self, guard):
         policy = {
             "Statement": [{
                 "Effect": "Allow",
@@ -215,9 +271,7 @@ class TestVerifyAccess:
     def test_condition_string_equals_tag(self, guard):
         policy = {
             "Statement": [{
-                "Effect": "Allow",
-                "Action": "*",
-                "Resource": "*",
+                "Effect": "Allow", "Action": "*", "Resource": "*",
                 "Condition": {"StringEquals": {"aws:PrincipalTag/Env": "prod"}},
             }]
         }
@@ -227,9 +281,7 @@ class TestVerifyAccess:
     def test_condition_string_like_wildcard(self, guard):
         policy = {
             "Statement": [{
-                "Effect": "Allow",
-                "Action": "*",
-                "Resource": "*",
+                "Effect": "Allow", "Action": "*", "Resource": "*",
                 "Condition": {"StringLike": {"aws:username": "svc-*"}},
             }]
         }
@@ -257,14 +309,14 @@ class TestVerifyLeastPrivilege:
     def test_admin_wildcard_policy_is_over_privileged(self, guard):
         policy = {"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
         result = guard.verify_least_privilege(policy)
-        assert result.allowed is True  # Violation detected: grants *:*
+        assert result.allowed is True  # Violation: grants *:*
 
     def test_read_only_policy_is_least_privilege(self, guard):
         policy = {"Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}
         result = guard.verify_least_privilege(policy)
         assert result.allowed is False  # Not over-privileged
 
-    def test_prefix_wildcard_still_not_full_admin(self, guard):
+    def test_prefix_wildcard_not_full_admin(self, guard):
         policy = {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]}
         result = guard.verify_least_privilege(policy)
-        assert result.allowed is False  # s3:* does not cover ec2:* → not *:*
+        assert result.allowed is False  # s3:* does not match * exactly

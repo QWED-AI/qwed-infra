@@ -2,11 +2,13 @@
 IAM Policy Verification using Z3 SMT Solver.
 Provides deterministic proof of whether a policy allows/denies access.
 """
+import ipaddress
 import traceback
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-from z3 import And, Length, Not, Or, Solver, String, StringVal, SubString, sat
+from z3 import And, InRe, Not, Or, Re, Solver, String, StringVal, Union, sat
 
 
 class IamPolicy(BaseModel):
@@ -31,24 +33,56 @@ class IamGuard:
         self.solver = Solver()
 
     # ------------------------------------------------------------------
-    # Pattern Matching
+    # Pattern Matching (Z3 Regex — handles interior/multiple wildcards)
     # ------------------------------------------------------------------
 
     def _match_pattern(self, z3_variable, pattern: str):
-        """Return a Z3 constraint matching variable against an IAM wildcard pattern."""
+        """
+        Return a Z3 constraint matching variable against an IAM wildcard pattern.
+        Translates '*' to Z3 Kleene star over any character.
+        Handles patterns with zero or more wildcards (including interior ones).
+        """
         if pattern == "*":
             return True
-        if pattern.endswith("*") and pattern.count("*") == 1:
-            prefix = pattern[:-1]
-            z3_prefix = StringVal(prefix)
-            return SubString(z3_variable, 0, Length(z3_prefix)) == z3_prefix
-        if pattern.startswith("*") and pattern.count("*") == 1:
-            suffix = pattern[1:]
-            z3_suffix = StringVal(suffix)
-            var_len = Length(z3_variable)
-            suff_len = Length(z3_suffix)
-            return SubString(z3_variable, var_len - suff_len, suff_len) == z3_suffix
-        return z3_variable == StringVal(pattern)
+
+        from z3 import Concat, Re, Star, Range
+        any_char_star = Star(Range(StringVal("\x00"), StringVal("\xff")))
+
+        parts = pattern.split("*")
+        if len(parts) == 1:
+            # No wildcard — exact match
+            return z3_variable == StringVal(pattern)
+
+        # Build regex: literal [.* literal]* anchored implicitly by Z3 InRe
+        regex = Re(StringVal(parts[0])) if parts[0] else any_char_star
+        if not parts[0]:
+            regex = any_char_star
+        else:
+            regex = Re(StringVal(parts[0]))
+
+        for part in parts[1:]:
+            if part:
+                regex = Concat(regex, any_char_star, Re(StringVal(part)))
+            else:
+                regex = Concat(regex, any_char_star)
+
+        return InRe(z3_variable, regex)
+
+
+    # ------------------------------------------------------------------
+    # CIDR helpers
+    # ------------------------------------------------------------------
+
+    def _cidr_to_prefix(self, cidr_base: str, mask: str) -> str:
+        """
+        Convert a CIDR block to a string prefix for simple prefix matching.
+        Uses Python's ipaddress module for correct octet count per mask.
+        e.g. 10.0.0.0/8 → "10.", 192.168.1.0/24 → "192.168.1.", 172.16.0.0/16 → "172.16."
+        """
+        network = ipaddress.ip_network(f"{cidr_base}/{mask}", strict=False)
+        full_octets = int(mask) // 8
+        octets = str(network.network_address).split(".")
+        return ".".join(octets[:full_octets]) + "."
 
     # ------------------------------------------------------------------
     # Condition Operators
@@ -61,13 +95,13 @@ class IamGuard:
         return And(cond_expr, StringVal(ctx_val) == StringVal(required_val))
 
     def _apply_string_like(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """Apply StringLike condition operator (supports wildcards)."""
+        """Apply StringLike condition operator (supports IAM wildcards)."""
         if ctx_val is None:
             return False
         return And(cond_expr, self._match_pattern(StringVal(ctx_val), required_val))
 
     def _apply_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """Apply IpAddress condition operator with simplified CIDR prefix matching."""
+        """Apply IpAddress condition operator with CIDR-aware prefix matching."""
         if ctx_val is None:
             return False
         if "/" not in required_val:
@@ -77,23 +111,43 @@ class IamGuard:
         return And(cond_expr, self._match_pattern(StringVal(ctx_val), prefix_part + "*"))
 
     def _apply_not_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """Apply NotIpAddress condition operator."""
+        """
+        Apply NotIpAddress condition operator.
+        Correctly handles CIDR blocks by negating prefix matching.
+        """
         if ctx_val is None:
             return False
-        return And(cond_expr, StringVal(ctx_val) != StringVal(required_val))
+        if "/" not in required_val:
+            return And(cond_expr, StringVal(ctx_val) != StringVal(required_val))
+        cidr_base, mask = required_val.split("/")
+        prefix_part = self._cidr_to_prefix(cidr_base, mask)
+        return And(cond_expr, Not(self._match_pattern(StringVal(ctx_val), prefix_part + "*")))
 
-    def _cidr_to_prefix(self, cidr_base: str, mask: str) -> str:
-        """Convert a CIDR base+mask to a simplified string prefix for matching."""
-        if mask == "8":
-            return cidr_base.split(".")[0] + "."
-        return cidr_base.rsplit(".", 1)[0] + "."
+    def _apply_date_less_than(self, ctx_val: Optional[str], required_val: str, cond_expr):
+        """
+        Apply DateLessThan operator using ISO8601 string comparison.
+        ISO8601 dates are lexicographically sortable when same length/format.
+        """
+        if ctx_val is None:
+            return False
+        try:
+            ctx_dt = datetime.fromisoformat(ctx_val.replace("Z", "+00:00"))
+            req_dt = datetime.fromisoformat(required_val.replace("Z", "+00:00"))
+            if ctx_dt < req_dt:
+                return cond_expr  # Condition satisfied — keep existing constraints
+            return False  # Date condition fails → deny
+        except ValueError:
+            return False  # Malformed date → fail closed
 
     # ------------------------------------------------------------------
     # Condition Block Evaluation
     # ------------------------------------------------------------------
 
     def _evaluate_operator(self, operator: str, ctx_val, required_val, cond_expr):
-        """Dispatch to the correct condition operator handler."""
+        """
+        Dispatch to the correct condition operator handler.
+        Returns False (fail-closed) for unknown/unimplemented operators.
+        """
         if operator == "StringEquals":
             return self._apply_string_equals(ctx_val, required_val, cond_expr)
         if operator == "StringLike":
@@ -103,9 +157,9 @@ class IamGuard:
         if operator == "NotIpAddress":
             return self._apply_not_ip_address(ctx_val, required_val, cond_expr)
         if operator == "DateLessThan":
-            # TODO: Implement ISO8601 date comparison via integer conversion
-            return cond_expr
-        return cond_expr
+            return self._apply_date_less_than(ctx_val, required_val, cond_expr)
+        # Unknown operator: fail closed (deny access) to prevent privilege escalation
+        return False
 
     def _evaluate_condition(self, condition_block: Dict, context: Dict) -> Any:
         """
@@ -146,6 +200,29 @@ class IamGuard:
         condition_match = self._evaluate_condition(stmt.get("Condition", {}), context)
 
         return And(action_match, resource_match, condition_match)
+
+    # ------------------------------------------------------------------
+    # Policy Logic (order-independent deny precedence)
+    # ------------------------------------------------------------------
+
+    def _build_policy_logic(self, policy: Dict, s_action, s_resource, context: Dict):
+        """
+        Build Z3 logic for the full policy with correct IAM deny precedence.
+        Explicit Deny always overrides Allow, regardless of statement order.
+        Pattern: And(Or(all_allows), And(Not(deny1), Not(deny2), ...))
+        """
+        allow_logic = False  # Default deny: no allows yet
+        deny_logic = True    # No denies yet (vacuously true)
+
+        for stmt in policy.get("Statement", []):
+            stmt_cond = self._build_statement_condition(stmt, s_action, s_resource, context)
+            if stmt.get("Effect", "Deny") == "Allow":
+                allow_logic = Or(allow_logic, stmt_cond)
+            else:
+                deny_logic = And(deny_logic, Not(stmt_cond))
+
+        # Access granted only if: some Allow matches AND no Deny matches
+        return And(allow_logic, deny_logic)
 
     # ------------------------------------------------------------------
     # Public API
@@ -201,21 +278,10 @@ class IamGuard:
                 error=str(exc) + " " + traceback.format_exc(),
             )
 
-    def _build_policy_logic(self, policy: Dict, s_action, s_resource, context: Dict):
-        """Fold all IAM statements into a single Z3 expression (default-deny)."""
-        full_logic = False  # Default Deny
-        for stmt in policy.get("Statement", []):
-            stmt_cond = self._build_statement_condition(stmt, s_action, s_resource, context)
-            if stmt.get("Effect", "Deny") == "Allow":
-                full_logic = Or(full_logic, stmt_cond)
-            else:
-                full_logic = And(full_logic, Not(stmt_cond))
-        return full_logic
-
     def verify_least_privilege(self, policy: Dict[str, Any]) -> VerificationResult:
         """
         Prove that the policy does NOT allow full admin access ("*" on "*").
-        Returns allowed=True if the policy IS over-privileged (fail).
+        Returns allowed=True if the policy IS over-privileged (violation).
         """
         return self.verify_access(
             policy,
@@ -226,3 +292,5 @@ class IamGuard:
                 "aws:CurrentTime": "2100-01-01T00:00:00Z",
             },
         )
+
+
