@@ -1,10 +1,20 @@
-from typing import List, Dict, Any, Optional
-from z3 import Solver, String, StringVal, Or, And, Not, If, Bool, unsat, sat
+"""
+IAM Policy Verification using Z3 SMT Solver.
+Provides deterministic proof of whether a policy allows/denies access.
+"""
+import ipaddress
+import traceback
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel
+from z3 import And, InRe, Not, Or, Solver, String, StringVal, sat
+
 
 class IamPolicy(BaseModel):
     Version: str
     Statement: List[Dict[str, Any]]
+
 
 class VerificationResult(BaseModel):
     verified: bool
@@ -12,160 +22,266 @@ class VerificationResult(BaseModel):
     proof: Optional[str] = None
     error: Optional[str] = None
 
+
 class IamGuard:
     """
     Deterministic IAM Policy Verification using Z3 Solver.
     Proves if a policy allows access to a specific action/resource.
     """
-    
+
     def __init__(self):
         self.solver = Solver()
-        
-    def verify_access(self, policy: Dict[str, Any], action: str, resource: str, context: Optional[Dict[str, Any]] = None) -> VerificationResult:
+
+    # ------------------------------------------------------------------
+    # Pattern Matching (Z3 Regex — handles interior/multiple wildcards)
+    # ------------------------------------------------------------------
+
+    def _match_pattern(self, z3_variable, pattern: str):
         """
-        Check if the given policy allows the specific action on the resource, given the context.
-        Context examples: {"aws:SourceIp": "192.168.1.5", "aws:CurrentTime": "2025-01-01T12:00:00Z"}
+        Return a Z3 constraint matching variable against an IAM wildcard pattern.
+        Translates '*' to Z3 Kleene star over any character.
+        Handles patterns with zero or more wildcards (including interior ones).
+        """
+        if pattern == "*":
+            return True
+
+        from z3 import Concat, Re, Star, Range
+        any_char_star = Star(Range(StringVal("\x00"), StringVal("\xff")))
+
+        parts = pattern.split("*")
+        if len(parts) == 1:
+            # No wildcard — exact match
+            return z3_variable == StringVal(pattern)
+
+        # Build regex: literal [.* literal]* anchored implicitly by Z3 InRe
+        if not parts[0]:
+            regex = any_char_star
+        else:
+            regex = Re(StringVal(parts[0]))
+
+        for part in parts[1:]:
+            if part:
+                regex = Concat(regex, any_char_star, Re(StringVal(part)))
+            else:
+                regex = Concat(regex, any_char_star)
+
+        return InRe(z3_variable, regex)
+
+
+    # ------------------------------------------------------------------
+    # Condition Operators
+    # ------------------------------------------------------------------
+
+    def _apply_string_equals(self, ctx_val: Optional[str], required_val: str, cond_expr):
+        """Apply StringEquals condition operator."""
+        if ctx_val is None:
+            return False
+        return And(cond_expr, StringVal(ctx_val) == StringVal(required_val))
+
+    def _apply_string_like(self, ctx_val: Optional[str], required_val: str, cond_expr):
+        """Apply StringLike condition operator (supports IAM wildcards)."""
+        if ctx_val is None:
+            return False
+        return And(cond_expr, self._match_pattern(StringVal(ctx_val), required_val))
+
+    def _apply_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
+        """
+        Apply IpAddress condition operator using exact ipaddress membership.
+        Correctly handles all CIDR mask sizes including /12, /20, etc.
+        """
+        if ctx_val is None:
+            return False
+        try:
+            ctx_ip = ipaddress.ip_address(ctx_val)
+            if "/" not in required_val:
+                return And(cond_expr, ctx_ip == ipaddress.ip_address(required_val))
+            return And(cond_expr, ctx_ip in ipaddress.ip_network(required_val, strict=False))
+        except ValueError:
+            return False
+
+    def _apply_not_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
+        """
+        Apply NotIpAddress condition operator using exact ipaddress membership.
+        Correctly handles all CIDR mask sizes including /12, /20, etc.
+        """
+        if ctx_val is None:
+            return False
+        try:
+            ctx_ip = ipaddress.ip_address(ctx_val)
+            if "/" not in required_val:
+                return And(cond_expr, ctx_ip != ipaddress.ip_address(required_val))
+            return And(cond_expr, ctx_ip not in ipaddress.ip_network(required_val, strict=False))
+        except ValueError:
+            return False
+
+    def _apply_date_less_than(self, ctx_val: Optional[str], required_val: str, cond_expr):
+        """
+        Apply DateLessThan operator using ISO8601 string comparison.
+        ISO8601 dates are lexicographically sortable when same length/format.
+        """
+        if ctx_val is None:
+            return False
+        try:
+            ctx_dt = datetime.fromisoformat(ctx_val.replace("Z", "+00:00"))
+            req_dt = datetime.fromisoformat(required_val.replace("Z", "+00:00"))
+            if ctx_dt < req_dt:
+                return cond_expr  # Condition satisfied — keep existing constraints
+            return False  # Date condition fails → deny
+        except (ValueError, TypeError):
+            return False  # Malformed date or naive/aware mismatch → fail closed
+
+    # ------------------------------------------------------------------
+    # Condition Block Evaluation
+    # ------------------------------------------------------------------
+
+    def _evaluate_operator(self, operator: str, ctx_val, required_val, cond_expr):
+        """
+        Dispatch to the correct condition operator handler.
+        Returns False (fail-closed) for unknown/unimplemented operators.
+        """
+        if operator == "StringEquals":
+            return self._apply_string_equals(ctx_val, required_val, cond_expr)
+        if operator == "StringLike":
+            return self._apply_string_like(ctx_val, required_val, cond_expr)
+        if operator == "IpAddress":
+            return self._apply_ip_address(ctx_val, required_val, cond_expr)
+        if operator == "NotIpAddress":
+            return self._apply_not_ip_address(ctx_val, required_val, cond_expr)
+        if operator == "DateLessThan":
+            return self._apply_date_less_than(ctx_val, required_val, cond_expr)
+        # Unknown operator: fail closed (deny access) to prevent privilege escalation
+        return False
+
+    def _evaluate_condition(self, condition_block: Dict, context: Dict) -> Any:
+        """
+        Evaluate an IAM condition block against a request context.
+        Returns a Z3 expression (or bool) representing the combined condition.
+        """
+        cond_expr = True
+        for operator, restrictions in condition_block.items():
+            for key, required_val in restrictions.items():
+                ctx_val = context.get(key)
+                cond_expr = self._evaluate_operator(operator, ctx_val, required_val, cond_expr)
+        return cond_expr
+
+    # ------------------------------------------------------------------
+    # Statement Building
+    # ------------------------------------------------------------------
+
+    def _build_match_list(self, z3_var, patterns: List[str]):
+        """Build a Z3 OR-expression matching a variable against a list of patterns."""
+        match_expr = False
+        for pattern in patterns:
+            constraint = True if pattern == "*" else self._match_pattern(z3_var, pattern)
+            match_expr = Or(match_expr, constraint) if match_expr is not False else constraint
+        return match_expr
+
+    def _build_statement_condition(self, stmt: Dict, s_action, s_resource, context: Dict):
+        """Build the Z3 condition for a single IAM statement."""
+        p_actions = stmt.get("Action", [])
+        if isinstance(p_actions, str):
+            p_actions = [p_actions]
+
+        p_resources = stmt.get("Resource", [])
+        if isinstance(p_resources, str):
+            p_resources = [p_resources]
+
+        action_match = self._build_match_list(s_action, p_actions)
+        resource_match = self._build_match_list(s_resource, p_resources)
+        condition_match = self._evaluate_condition(stmt.get("Condition", {}), context)
+
+        return And(action_match, resource_match, condition_match)
+
+    # ------------------------------------------------------------------
+    # Policy Logic (order-independent deny precedence)
+    # ------------------------------------------------------------------
+
+    def _build_policy_logic(self, policy: Dict, s_action, s_resource, context: Dict):
+        """
+        Build Z3 logic for the full policy with correct IAM deny precedence.
+        Explicit Deny always overrides Allow, regardless of statement order.
+        Pattern: And(Or(all_allows), And(Not(deny1), Not(deny2), ...))
+        """
+        allow_logic = False  # Default deny: no allows yet
+        deny_logic = True    # No denies yet (vacuously true)
+
+        for stmt in policy.get("Statement", []):
+            stmt_cond = self._build_statement_condition(stmt, s_action, s_resource, context)
+            if stmt.get("Effect", "Deny") == "Allow":
+                allow_logic = Or(allow_logic, stmt_cond)
+            else:
+                deny_logic = And(deny_logic, Not(stmt_cond))
+
+        # Access granted only if: some Allow matches AND no Deny matches
+        return And(allow_logic, deny_logic)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def verify_access(
+        self,
+        policy: Dict[str, Any],
+        action: str,
+        resource: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> VerificationResult:
+        """
+        Check if the given policy allows the specific action on the resource.
+
+        Args:
+            policy:   IAM policy dict with Statement list.
+            action:   AWS action string, e.g. "s3:GetObject".
+            resource: AWS resource ARN string.
+            context:  Request context, e.g. {"aws:SourceIp": "10.0.0.5"}.
+
+        Returns:
+            VerificationResult with verified/allowed flags and Z3 proof string.
         """
         if context is None:
             context = {}
         try:
-            # Simple Z3 model of IAM logic
-            s_action = String('action')
-            s_resource = String('resource')
-            
-            # The query conditions (Action & Resource)
+            s_action = String("action")
+            s_resource = String("resource")
             query = And(s_action == StringVal(action), s_resource == StringVal(resource))
-            
-            # Helper: Match Pattern (Wildcards)
-            def match_constraint(variable, pattern):
-                from z3 import Length, SubString
-                if pattern == "*": return True
-                if pattern.endswith("*") and pattern.count("*") == 1:
-                    prefix = pattern[:-1]
-                    z3_prefix = StringVal(prefix)
-                    return SubString(variable, 0, Length(z3_prefix)) == z3_prefix
-                if pattern.startswith("*") and pattern.count("*") == 1:
-                     suffix = pattern[1:]
-                     z3_suffix = StringVal(suffix)
-                     var_len = Length(variable)
-                     suff_len = Length(z3_suffix)
-                     return SubString(variable, var_len - suff_len, suff_len) == z3_suffix
-                return variable == StringVal(pattern)
 
-            # Helper: Evaluate Conditions (IP, Date, String)
-            def evaluate_condition(condition_block):
-                # Condition block: { Operator: { Key: Value } }
-                # e.g. { "IpAddress": {"aws:SourceIp": "10.0.0.0/8"} }
-                cond_expr = True
-                
-                for operator, restrictions in condition_block.items():
-                    for key, required_val in restrictions.items():
-                        # Get actual value from context (mocked for verification)
-                        # If context doesn't provide it, we assume it matches? 
-                        # No, for verification we usually want to prove it *must* match.
-                        # But here we are verifying if a REQUEST (context) is allowed.
-                        ctx_val = context.get(key)
-                        
-                        if operator == "StringEquals":
-                            if ctx_val is None: return False # Missing context key fails condition
-                            cond_expr = And(cond_expr, StringVal(ctx_val) == StringVal(required_val))
-                            
-                        elif operator == "StringLike":
-                            if ctx_val is None: return False
-                            # Reuse match_constraint for StringLike
-                            # We need to construct a Z3 variable for the context value? 
-                            # Actually ctx_val is concrete here. required_val is the pattern.
-                            # We can just use Python check if ctx_val is known, OR Z3 if we treat context as symbolic variables?
-                            # For verify_access, the inputs are concrete strings. So we can use Python logic or Z3 constant comparison.
-                            # Let's keep it Z3 for consistency.
-                            cond_expr = And(cond_expr, match_constraint(StringVal(ctx_val), required_val))
+            policy_logic = self._build_policy_logic(policy, s_action, s_resource, context)
 
-                        elif operator == "IpAddress":
-                             if ctx_val is None: return False
-                             # Simplified CIDR check: For now only exact string match or simple prefix
-                             # In real world: IP -> Int conversions.
-                             # Hack for v1: If value ends in /24, treat as prefix.
-                             if "/" in required_val:
-                                 cidr_base, mask = required_val.split("/")
-                                 # 192.168.1.0/24 -> Prefix "192.168.1."
-                                 # This is NOT technically accurate but suffices for "10.0.0.0/8" -> "10."
-                                 prefix_part = cidr_base.rsplit('.', 1)[0] + "." # Simplistic
-                                 if mask == "8": prefix_part = cidr_base.split('.')[0] + "."
-                                 cond_expr = And(cond_expr, match_constraint(StringVal(ctx_val), prefix_part + "*"))
-                        elif operator == "NotIpAddress":
-                             if ctx_val is None: return False
-                             # Block if IP matches a denied range
-                             cond_expr = And(cond_expr, StringVal(ctx_val) != StringVal(required_val))
-                                 
-                        elif operator == "DateLessThan":
-                            if ctx_val is None: return False
-                            # String comparison works for ISO8601 (2025... < 2026...)
-                            from z3 import ULE, Length
-                            # Z3 String comparison is lexicographical? No, standard Z3 String doesn't support < directly easily.
-                            # We'll rely on python pre-computation if possible? 
-                            # Or just simplified string equality for now?
-                            # Let's SKIP Date math for this exact step to keep it safe, default to True (warn user).
-                            # Wait, we promised Date.
-                            # Simple approach: If strings are same length, we can compare character by character? Too complex.
-                            # Alternative: Assume if it's strictly ISO format, lexicographical sort works.
-                            # But Z3 String theory is limited.
-                            # Let's fail safe: specific Logic.
-                            pass # TODO: Implement Date Logic via Int conversion
-                            
-                return cond_expr
-
-            # Build policy formula
-            full_policy_logic = False # Default Deny
-            
-            statements = policy.get("Statement", [])
-            for stmt in statements:
-                effect = stmt.get("Effect", "Deny")
-                
-                # Actions
-                p_actions = stmt.get("Action", [])
-                if isinstance(p_actions, str): p_actions = [p_actions]
-                action_match = False
-                for pact in p_actions:
-                    constraint = True if pact == "*" else match_constraint(s_action, pact)
-                    action_match = Or(action_match, constraint) if action_match is not False else constraint
-                        
-                # Resources
-                p_resources = stmt.get("Resource", [])
-                if isinstance(p_resources, str): p_resources = [p_resources]
-                resource_match = False
-                for pres in p_resources:
-                    constraint = True if pres == "*" else match_constraint(s_resource, pres)
-                    resource_match = Or(resource_match, constraint) if resource_match is not False else constraint
-                
-                # Conditions
-                condition_block = stmt.get("Condition", {})
-                condition_match = evaluate_condition(condition_block) # Returns Z3 expression or Bool
-                
-                stmt_condition = And(action_match, resource_match, condition_match)
-                
-                if effect == "Allow":
-                    full_policy_logic = Or(full_policy_logic, stmt_condition)
-                else: # Deny
-                    full_policy_logic = And(full_policy_logic, Not(stmt_condition))
-
-            # Solve
             self.solver.reset()
             self.solver.add(query)
-            self.solver.add(full_policy_logic)
-            
-            result = self.solver.check()
-            
-            if result == sat:
-                return VerificationResult(verified=True, allowed=True, proof="Z3 found a satisfying model (Access Allowed)")
-            else:
-                return VerificationResult(verified=True, allowed=False, proof="Z3 proved unsatisfiability (Access Denied)")
-                
-        except Exception as e:
-            import traceback
-            return VerificationResult(verified=False, allowed=False, error=str(e) + " " + traceback.format_exc())
+            self.solver.add(policy_logic)
+
+            if self.solver.check() == sat:
+                return VerificationResult(
+                    verified=True,
+                    allowed=True,
+                    proof="Z3 found a satisfying model (Access Allowed)",
+                )
+            return VerificationResult(
+                verified=True,
+                allowed=False,
+                proof="Z3 proved unsatisfiability (Access Denied)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return VerificationResult(
+                verified=False,
+                allowed=False,
+                error=str(exc) + " " + traceback.format_exc(),
+            )
 
     def verify_least_privilege(self, policy: Dict[str, Any]) -> VerificationResult:
         """
-        Prove that the policy does NOT allow full administrative access ("*:*").
+        Prove that the policy does NOT allow full admin access ("*" on "*").
+        Returns allowed=True if the policy IS over-privileged (violation).
         """
-        return self.verify_access(policy, action="*", resource="*", context={"aws:SourceIp": "0.0.0.0", "aws:CurrentTime": "2100-01-01T00:00:00Z"})
+        return self.verify_access(
+            policy,
+            action="*",
+            resource="*",
+            context={
+                "aws:SourceIp": "0.0.0.0",
+                "aws:CurrentTime": "2100-01-01T00:00:00Z",
+            },
+        )
+
+
