@@ -33,3 +33,55 @@ def test_parse_simple_infrastructure(parser):
     vol = volumes[0]
     assert vol["id"] == "data_vol"
     assert vol["size_gb"] == 40
+
+
+# ------------------------------------------------------------------
+# _normalize_resource — unit tests for individual resource type paths
+# ------------------------------------------------------------------
+
+class TestNormalizeResource:
+    def test_aws_instance_normalized(self, parser):
+        result = parser._normalize_resource("aws_instance", "web", {"instance_type": "t3.micro", "count": 2})
+        assert result["category"] == "instances"
+        assert result["data"]["id"] == "web"
+        assert result["data"]["instance_type"] == "t3.micro"
+        assert result["data"]["count"] == 2
+
+    def test_aws_instance_defaults(self, parser):
+        result = parser._normalize_resource("aws_instance", "srv", {})
+        assert result["data"]["instance_type"] == "t2.micro"
+        assert result["data"]["count"] == 1
+
+    def test_aws_iam_policy_normalized(self, parser):
+        result = parser._normalize_resource("aws_iam_policy", "my_policy", {"policy": None})
+        assert result is not None
+        assert result["category"] == "policies"
+        assert result["data"]["id"] == "my_policy"
+        assert result["data"]["Version"] == "2012-10-17"
+        assert isinstance(result["data"]["Statement"], list)
+
+    def test_aws_iam_policy_with_string_policy(self, parser):
+        # String policy (jsonencode placeholder) — should still return a skeleton policy
+        result = parser._normalize_resource("aws_iam_policy", "str_policy", {"policy": '{"Statement":[]}'})
+        assert result is not None
+        assert result["category"] == "policies"
+
+    def test_aws_ebs_volume_normalized(self, parser):
+        result = parser._normalize_resource("aws_ebs_volume", "my_vol", {"size": 100})
+        assert result["category"] == "volumes"
+        assert result["data"]["id"] == "my_vol"
+        assert result["data"]["size_gb"] == 100
+
+    def test_aws_ebs_volume_default_size(self, parser):
+        result = parser._normalize_resource("aws_ebs_volume", "small_vol", {})
+        assert result["data"]["size_gb"] == 10
+
+    def test_unknown_resource_type_returns_none(self, parser):
+        result = parser._normalize_resource("aws_s3_bucket", "my_bucket", {"acl": "private"})
+        assert result is None
+
+    def test_aws_security_group_returns_none(self, parser):
+        # Security groups are not yet mapped — should return None (not crash)
+        result = parser._normalize_resource("aws_security_group", "sg_web", {"ingress": []})
+        assert result is None
+
