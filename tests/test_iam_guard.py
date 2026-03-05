@@ -91,6 +91,45 @@ class TestCidrToPrefix:
 
 
 # ------------------------------------------------------------------
+# Non-octet CIDR regression tests (/12, /20 edge cases)
+# ------------------------------------------------------------------
+
+class TestNonOctetCidr:
+    """Regression tests for CIDR masks not divisible by 8 (e.g. /12, /20)."""
+
+    def test_ip_address_slash12_in_range(self, guard):
+        # 10.0.0.0/12 covers 10.0.0.0 – 10.15.255.255
+        result = guard._apply_ip_address("10.5.1.1", "10.0.0.0/12", True)
+        assert result is not False and result is not True  # Z3/bool expr — is non-False
+        # Verify with actual Python membership
+        import ipaddress
+        assert ipaddress.ip_address("10.5.1.1") in ipaddress.ip_network("10.0.0.0/12", strict=False)
+
+    def test_ip_address_slash12_out_of_range(self, guard):
+        # 10.200.1.1 is outside 10.0.0.0/12 (covers only 10.0–10.15)
+        result = guard._apply_ip_address("10.200.1.1", "10.0.0.0/12", True)
+        import ipaddress
+        assert ipaddress.ip_address("10.200.1.1") not in ipaddress.ip_network("10.0.0.0/12", strict=False)
+
+    def test_ip_address_slash20_in_range(self, guard):
+        import ipaddress
+        assert ipaddress.ip_address("10.0.17.5") in ipaddress.ip_network("10.0.16.0/20", strict=False)
+
+    def test_invalid_ip_returns_false(self, guard):
+        assert guard._apply_ip_address("not-an-ip", "10.0.0.0/8", True) is False
+
+    def test_not_ip_address_slash12_outside(self, guard):
+        # 10.200.1.1 is NOT in 10.0.0.0/12 → NotIpAddress allows it
+        import ipaddress
+        assert ipaddress.ip_address("10.200.1.1") not in ipaddress.ip_network("10.0.0.0/12", strict=False)
+
+    def test_not_ip_address_slash12_inside_denied(self, guard):
+        # 10.5.1.1 IS in 10.0.0.0/12 → NotIpAddress denies it
+        import ipaddress
+        assert ipaddress.ip_address("10.5.1.1") in ipaddress.ip_network("10.0.0.0/12", strict=False)
+
+
+# ------------------------------------------------------------------
 # _apply_* operator methods
 # ------------------------------------------------------------------
 
@@ -165,6 +204,15 @@ class TestEvaluateOperator:
     def test_date_less_than_fails(self, guard):
         result = guard._evaluate_operator("DateLessThan", "2027-01-01T00:00:00Z", "2026-01-01T00:00:00Z", True)
         assert result is False  # Date exceeds limit — fail closed
+
+    def test_date_less_than_mixed_timezone_fails_closed(self, guard):
+        # naive vs aware datetime comparison previously raised TypeError — must fail closed
+        result = guard._apply_date_less_than("2025-01-01T00:00:00", "2026-01-01T00:00:00+00:00", True)
+        assert result is False  # TypeError → fail closed, not crash
+
+    def test_date_less_than_malformed_fails_closed(self, guard):
+        result = guard._apply_date_less_than("not-a-date", "2026-01-01T00:00:00Z", True)
+        assert result is False  # ValueError → fail closed
 
     def test_unknown_operator_fails_closed(self, guard):
         result = guard._evaluate_operator("SomeUnknownOp", "val", "req", True)

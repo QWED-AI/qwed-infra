@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-from z3 import And, InRe, Not, Or, Re, Solver, String, StringVal, Union, sat
+from z3 import And, InRe, Not, Or, Solver, String, StringVal, sat
 
 
 class IamPolicy(BaseModel):
@@ -54,7 +54,6 @@ class IamGuard:
             return z3_variable == StringVal(pattern)
 
         # Build regex: literal [.* literal]* anchored implicitly by Z3 InRe
-        regex = Re(StringVal(parts[0])) if parts[0] else any_char_star
         if not parts[0]:
             regex = any_char_star
         else:
@@ -101,27 +100,34 @@ class IamGuard:
         return And(cond_expr, self._match_pattern(StringVal(ctx_val), required_val))
 
     def _apply_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """Apply IpAddress condition operator with CIDR-aware prefix matching."""
+        """
+        Apply IpAddress condition operator using exact ipaddress membership.
+        Correctly handles all CIDR mask sizes including /12, /20, etc.
+        """
         if ctx_val is None:
             return False
-        if "/" not in required_val:
-            return And(cond_expr, StringVal(ctx_val) == StringVal(required_val))
-        cidr_base, mask = required_val.split("/")
-        prefix_part = self._cidr_to_prefix(cidr_base, mask)
-        return And(cond_expr, self._match_pattern(StringVal(ctx_val), prefix_part + "*"))
+        try:
+            ctx_ip = ipaddress.ip_address(ctx_val)
+            if "/" not in required_val:
+                return And(cond_expr, ctx_ip == ipaddress.ip_address(required_val))
+            return And(cond_expr, ctx_ip in ipaddress.ip_network(required_val, strict=False))
+        except ValueError:
+            return False
 
     def _apply_not_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
         """
-        Apply NotIpAddress condition operator.
-        Correctly handles CIDR blocks by negating prefix matching.
+        Apply NotIpAddress condition operator using exact ipaddress membership.
+        Correctly handles all CIDR mask sizes including /12, /20, etc.
         """
         if ctx_val is None:
             return False
-        if "/" not in required_val:
-            return And(cond_expr, StringVal(ctx_val) != StringVal(required_val))
-        cidr_base, mask = required_val.split("/")
-        prefix_part = self._cidr_to_prefix(cidr_base, mask)
-        return And(cond_expr, Not(self._match_pattern(StringVal(ctx_val), prefix_part + "*")))
+        try:
+            ctx_ip = ipaddress.ip_address(ctx_val)
+            if "/" not in required_val:
+                return And(cond_expr, ctx_ip != ipaddress.ip_address(required_val))
+            return And(cond_expr, ctx_ip not in ipaddress.ip_network(required_val, strict=False))
+        except ValueError:
+            return False
 
     def _apply_date_less_than(self, ctx_val: Optional[str], required_val: str, cond_expr):
         """
@@ -136,8 +142,8 @@ class IamGuard:
             if ctx_dt < req_dt:
                 return cond_expr  # Condition satisfied — keep existing constraints
             return False  # Date condition fails → deny
-        except ValueError:
-            return False  # Malformed date → fail closed
+        except (ValueError, TypeError):
+            return False  # Malformed date or naive/aware mismatch → fail closed
 
     # ------------------------------------------------------------------
     # Condition Block Evaluation
