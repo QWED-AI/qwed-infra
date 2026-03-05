@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 from pydantic import BaseModel
 
 class CostEstimate(BaseModel):
@@ -50,16 +50,12 @@ class CostGuard:
         for inst in instances:
             inst_type = inst.get("instance_type", "t3.micro")
             count = inst.get("count", 1)
-            
             price = self.PRICING_CATALOG.get(inst_type)
             if price is None:
-                # Fallback or strict failure? 
-                # For deterministic verification, unknown price should probably be valid=False or generic error.
-                # Let's assume 0 but flag it, or simplistic fallback.
-                price = 0.0 
+                # Unknown instance type: log zero cost and skip to avoid price=None crash
                 breakdown[f"unknown-{inst_type}"] = 0.0
                 continue
-                
+
             cost = price * count
             total_hourly_cost += cost
             breakdown[inst['id']] = cost * self.HOURS_PER_MONTH

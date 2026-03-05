@@ -1,6 +1,5 @@
 import hcl2
-import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 
 class TerraformParser:
@@ -90,7 +89,7 @@ class TerraformParser:
                         "Statement": statements # Placeholder until we implement JSON string parser
                     }
                 }
-            except:
+            except Exception:  # noqa: BLE001
                 pass
 
         # --- Storage ---
