@@ -77,7 +77,6 @@ class NetworkGuard:
             
         # 3. Check Security Groups (Firewall Logic)
         # simplified: check destination ingress
-        _unused_dest_node = resources.get("subnets", []) # simplistic lookup — unused, SGs found below
         target_sgs = []
         
         # Find dest subnet definition

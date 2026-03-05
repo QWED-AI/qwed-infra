@@ -43,6 +43,8 @@ def test_unknown_instance_type_handled(guard):
         ]
     }
     result = guard.verify_budget(resources, budget_monthly=10.0)
-    # Should calculate as 0 cost for now, so passes budget
-    assert result.within_budget is True
-    assert "unknown-quantum.bit" in result.breakdown
+    # Unknown instance type → fail closed: cannot prove budget is within limits
+    assert result.within_budget is False
+    assert "unknown instance types" in result.reason.lower()
+    assert "quantum.bit" in result.reason
+    assert "unknown-weird-instance" in result.breakdown  # keyed by inst id

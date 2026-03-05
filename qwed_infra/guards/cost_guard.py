@@ -43,7 +43,8 @@ class CostGuard:
         """
         total_hourly_cost = 0.0
         breakdown = {}
-        
+        unknown_instance_types = []
+
         # 1. Calculate Estimations
         # Instances
         instances = resources.get("instances", [])
@@ -52,8 +53,8 @@ class CostGuard:
             count = inst.get("count", 1)
             price = self.PRICING_CATALOG.get(inst_type)
             if price is None:
-                # Unknown instance type: log zero cost and skip to avoid price=None crash
-                breakdown[f"unknown-{inst_type}"] = 0.0
+                breakdown[f"unknown-{inst.get('id', inst_type)}"] = 0.0
+                unknown_instance_types.append(inst_type)
                 continue
 
             cost = price * count
@@ -74,10 +75,16 @@ class CostGuard:
         total_monthly = total_hourly_cost * self.HOURS_PER_MONTH
         
         # 2. Check Budget
-        within_budget = total_monthly <= budget_monthly
-        
-        reason = ""
-        if within_budget:
+        # Unknown instance types → fail closed (budget cannot be proved)
+        within_budget = (total_monthly <= budget_monthly) and not unknown_instance_types
+
+        if unknown_instance_types:
+            reason = (
+                f"Cost estimate incomplete — unknown instance types: "
+                f"{sorted(set(unknown_instance_types))}. "
+                f"Known cost ${total_monthly:.2f} vs budget ${budget_monthly:.2f}."
+            )
+        elif within_budget:
             reason = f"Estimated cost ${total_monthly:.2f} is within budget ${budget_monthly:.2f}"
         else:
             reason = f"Estimated cost ${total_monthly:.2f} EXCEEDS budget ${budget_monthly:.2f}"

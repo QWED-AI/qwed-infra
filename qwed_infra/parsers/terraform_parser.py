@@ -89,8 +89,9 @@ class TerraformParser:
                         "Statement": statements # Placeholder until we implement JSON string parser
                     }
                 }
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                print(f"Failed to normalize aws_iam_policy '{res_name}': {exc}")
+                return None
 
         # --- Storage ---
         if res_type == "aws_ebs_volume":
