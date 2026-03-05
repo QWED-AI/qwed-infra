@@ -79,17 +79,6 @@ class TestMatchPattern:
 # _cidr_to_prefix
 # ------------------------------------------------------------------
 
-class TestCidrToPrefix:
-    def test_mask_8(self, guard):
-        assert guard._cidr_to_prefix("10.0.0.0", "8") == "10."
-
-    def test_mask_24(self, guard):
-        assert guard._cidr_to_prefix("192.168.1.0", "24") == "192.168.1."
-
-    def test_mask_16(self, guard):
-        assert guard._cidr_to_prefix("172.16.0.0", "16") == "172.16."
-
-
 # ------------------------------------------------------------------
 # Non-octet CIDR regression tests (/12, /20 edge cases)
 # ------------------------------------------------------------------
@@ -100,33 +89,29 @@ class TestNonOctetCidr:
     def test_ip_address_slash12_in_range(self, guard):
         # 10.0.0.0/12 covers 10.0.0.0 – 10.15.255.255
         result = guard._apply_ip_address("10.5.1.1", "10.0.0.0/12", True)
-        assert result is not False and result is not True  # Z3/bool expr — is non-False
-        # Verify with actual Python membership
-        import ipaddress
-        assert ipaddress.ip_address("10.5.1.1") in ipaddress.ip_network("10.0.0.0/12", strict=False)
+        assert result is not False and result is not True  # Z3 expr — satisfiable
 
     def test_ip_address_slash12_out_of_range(self, guard):
-        # 10.200.1.1 is outside 10.0.0.0/12 (covers only 10.0–10.15)
-        guard._apply_ip_address("10.200.1.1", "10.0.0.0/12", True)
-        import ipaddress
-        assert ipaddress.ip_address("10.200.1.1") not in ipaddress.ip_network("10.0.0.0/12", strict=False)
+        # 10.200.1.1 is outside 10.0.0.0/12 — constraint must be unsatisfiable
+        result = guard._apply_ip_address("10.200.1.1", "10.0.0.0/12", True)
+        assert _solve_unsat(result)
 
     def test_ip_address_slash20_in_range(self, guard):
-        import ipaddress
-        assert ipaddress.ip_address("10.0.17.5") in ipaddress.ip_network("10.0.16.0/20", strict=False)
+        result = guard._apply_ip_address("10.0.17.5", "10.0.16.0/20", True)
+        assert result is not False and result is not True  # Z3 expr — satisfiable
 
     def test_invalid_ip_returns_false(self, guard):
         assert guard._apply_ip_address("not-an-ip", "10.0.0.0/8", True) is False
 
-    def test_not_ip_address_slash12_outside(self, guard):
-        # 10.200.1.1 is NOT in 10.0.0.0/12 → NotIpAddress allows it
-        import ipaddress
-        assert ipaddress.ip_address("10.200.1.1") not in ipaddress.ip_network("10.0.0.0/12", strict=False)
+    def test_not_ip_address_slash12_outside_allowed(self, guard):
+        # 10.200.1.1 is NOT in 10.0.0.0/12 → NotIpAddress should succeed (non-False)
+        result = guard._apply_not_ip_address("10.200.1.1", "10.0.0.0/12", True)
+        assert result is not False and result is not True  # Z3 expr — satisfiable
 
     def test_not_ip_address_slash12_inside_denied(self, guard):
-        # 10.5.1.1 IS in 10.0.0.0/12 → NotIpAddress denies it
-        import ipaddress
-        assert ipaddress.ip_address("10.5.1.1") in ipaddress.ip_network("10.0.0.0/12", strict=False)
+        # 10.5.1.1 IS in 10.0.0.0/12 → NotIpAddress must be unsatisfiable
+        result = guard._apply_not_ip_address("10.5.1.1", "10.0.0.0/12", True)
+        assert _solve_unsat(result)
 
 
 # ------------------------------------------------------------------

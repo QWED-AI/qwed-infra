@@ -69,21 +69,6 @@ class IamGuard:
 
 
     # ------------------------------------------------------------------
-    # CIDR helpers
-    # ------------------------------------------------------------------
-
-    def _cidr_to_prefix(self, cidr_base: str, mask: str) -> str:
-        """
-        Convert a CIDR block to a string prefix for simple prefix matching.
-        Uses Python's ipaddress module for correct octet count per mask.
-        e.g. 10.0.0.0/8 → "10.", 192.168.1.0/24 → "192.168.1.", 172.16.0.0/16 → "172.16."
-        """
-        network = ipaddress.ip_network(f"{cidr_base}/{mask}", strict=False)
-        full_octets = int(mask) // 8
-        octets = str(network.network_address).split(".")
-        return ".".join(octets[:full_octets]) + "."
-
-    # ------------------------------------------------------------------
     # Condition Operators
     # ------------------------------------------------------------------
 
