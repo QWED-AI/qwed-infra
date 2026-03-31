@@ -157,6 +157,17 @@ A: We use public On-Demand pricing for "Worst Case" estimation. If you have Ente
 
 ---
 
+## 🌐 QWED Ecosystem
+
+| Package | What it does | Install |
+|---------|-------------|---------|
+| **[qwed-verification](https://github.com/QWED-AI/qwed-verification)** | Core deterministic AI verification (Math, Logic, Code) | `pip install qwed-verification` |
+| **[qwed-open-responses](https://github.com/QWED-AI/qwed-open-responses)** | Guards for OpenAI/LangChain agent outputs | `pip install qwed-open-responses` / `npm i qwed-open-responses` |
+| **[qwed-infra](https://github.com/QWED-AI/qwed-infra)** ← you are here | IaC verification (Terraform/IAM/Network/Cost) | `pip install qwed-infra` |
+| **[QWED Security](https://github.com/marketplace/qwed-security)** | GitHub App — auto-scans PRs | Install from Marketplace |
+
+---
+
 ## 📄 License
 Apache 2.0 - Open Source.
 
