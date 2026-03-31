@@ -157,6 +157,23 @@ A: We use public On-Demand pricing for "Worst Case" estimation. If you have Ente
 
 ---
 
+## 🌐 QWED Ecosystem
+
+| Package | What it does |
+|---------|-------------|
+| **[qwed-verification](https://github.com/QWED-AI/qwed-verification)** | Core deterministic AI verification (Math, Logic, Code) |
+| **[qwed-open-responses](https://github.com/QWED-AI/qwed-open-responses)** | Guards for OpenAI/LangChain agent outputs |
+| **[qwed-infra](https://github.com/QWED-AI/qwed-infra)** ← you are here | IaC verification (Terraform/IAM/Network/Cost) |
+| **[qwed-a2a](https://github.com/QWED-AI/qwed-a2a)** | Agent-to-Agent verification protocol |
+| **[qwed-mcp](https://github.com/QWED-AI/qwed-mcp)** | Model Context Protocol verification |
+| **[qwed-ucp](https://github.com/QWED-AI/qwed-ucp)** | Unified Context Protocol |
+| **[qwed-finance](https://github.com/QWED-AI/qwed-finance)** | Financial computation verification |
+| **[qwed-tax](https://github.com/QWED-AI/qwed-tax)** | Tax calculation verification |
+| **[qwed-legal](https://github.com/QWED-AI/qwed-legal)** | Legal document verification |
+| **[qwed-learning](https://github.com/QWED-AI/qwed-learning)** | Educational content verification |
+
+---
+
 ## 📄 License
 Apache 2.0 - Open Source.
 
