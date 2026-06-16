@@ -24,6 +24,10 @@ FORBIDDEN_CALLS = {
     "popen",
 }
 
+# Bare leaf names of forbidden calls — catches import-alias bypasses
+# e.g. `from subprocess import run; run("cmd")` produces bare `run` not `subprocess.run`
+FORBIDDEN_LEAF_NAMES = {name.split(".")[-1] for name in FORBIDDEN_CALLS}
+
 
 def get_call_names(node: ast.Call) -> list[str]:
     names = []
@@ -38,7 +42,8 @@ def get_call_names(node: ast.Call) -> list[str]:
         if isinstance(current, ast.Name):
             parts.append(current.id)
         elif isinstance(current, ast.Call):
-            return names
+            # Chained call like get_runner().run(...) — can't extract base name
+            pass
         names.append(".".join(reversed(parts)))
     return names
 
@@ -75,12 +80,20 @@ def check_file(filepath: Path) -> list[str]:
                         f"Disallowed call '{name}()'"
                     )
 
-            # os.system, subprocess.*, popen
+            # os.system, subprocess.*, popen (dotted names)
             if name in FORBIDDEN_CALLS:
                 errors.append(
                     f"  [BARE_SHELL] {relpath}:{node.lineno}: "
                     f"Disallowed call '{name}()'"
                 )
+
+            # Import-alias bypass: from subprocess import run; run("cmd")
+            if "." not in name and leaf in FORBIDDEN_LEAF_NAMES:
+                if leaf not in {"eval", "exec"}:
+                    errors.append(
+                        f"  [BARE_SHELL] {relpath}:{node.lineno}: "
+                        f"Disallowed bare call '{name}()' — possible import alias"
+                    )
 
     return errors
 
