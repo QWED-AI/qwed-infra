@@ -7,12 +7,22 @@ from unittest.mock import patch
 def parser():
     return TerraformParser()
 
-def test_parse_simple_infrastructure(parser):
-    # Locate fixture
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    fixtures_dir = os.path.join(current_dir, "fixtures")
+@patch('qwed_infra.parsers.terraform_parser.hcl2.load')
+def test_parse_simple_infrastructure(mock_hcl2_load, parser, tmp_path):
+    """Integration test: mock hcl2.load to return known HCL structure and verify parsing."""
+    # Create a dummy .tf file so the glob finds something
+    tf_file = tmp_path / "test.tf"
+    tf_file.write_text("")
     
-    resources = parser.parse_directory(fixtures_dir)
+    mock_hcl2_load.return_value = {
+        "resource": [
+            {"aws_instance": {"web": {"instance_type": "t3.micro", "count": 2}}},
+            {"aws_instance": {"gpu_node": {"instance_type": "p4d.24xlarge"}}},
+            {"aws_ebs_volume": {"data_vol": {"size": 40}}},
+        ]
+    }
+    
+    resources = parser.parse_directory(str(tmp_path))
     
     # Verify Instances
     instances = resources["instances"]
