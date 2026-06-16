@@ -1,0 +1,24 @@
+## QWED Enforcement Checklist
+
+- [ ] Verification before execution — no path bypasses verification
+- [ ] Fail closed — all failure paths block, not degrade
+- [ ] Approved paths only — no bare `eval` / `exec` / `subprocess`
+- [ ] No silent degradation — no suppressed errors or bypass-oriented retries
+- [ ] IAM policies verified with Z3 (regex-only checks are not sufficient)
+- [ ] Network reachability proven via graph traversal, not port matching alone
+- [ ] Cost estimation fails closed on unknown instance types
+- [ ] Vulnerability family thinking — similar bypass patterns considered
+- [ ] Existing issues not regressed — severity of unfixed issues unchanged
+
+## Summary
+
+Describe the intent of the change and the verification boundary it touches.
+
+## Validation
+
+List the checks, tests, or scans used to validate this PR.
+
+## Notes
+
+If this change affects enforcement behavior, explain why it is still compliant
+with [QWED_RULES.md](../QWED_RULES.md).
