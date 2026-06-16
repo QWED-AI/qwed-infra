@@ -41,10 +41,8 @@ def get_call_names(node: ast.Call) -> list[str]:
             current = current.value
         if isinstance(current, ast.Name):
             parts.append(current.id)
-        elif isinstance(current, ast.Call):
-            # Chained call like get_runner().run(...) — can't extract base name
-            pass
-        names.append(".".join(reversed(parts)))
+            names.append(".".join(reversed(parts)))
+        # Chained call like get_runner().run(...) → skip, not a bare call
     return names
 
 
@@ -88,12 +86,12 @@ def check_file(filepath: Path) -> list[str]:
                 )
 
             # Import-alias bypass: from subprocess import run; run("cmd")
-            if "." not in name and leaf in FORBIDDEN_LEAF_NAMES:
-                if leaf not in {"eval", "exec"}:
-                    errors.append(
-                        f"  [BARE_SHELL] {relpath}:{node.lineno}: "
-                        f"Disallowed bare call '{name}()' — possible import alias"
-                    )
+            # Skip if already caught by the dotted-name check above (prevents double-report)
+            elif "." not in name and name in FORBIDDEN_LEAF_NAMES:
+                errors.append(
+                    f"  [BARE_SHELL] {relpath}:{node.lineno}: "
+                    f"Disallowed bare call '{name}()' — possible import alias"
+                )
 
     return errors
 
