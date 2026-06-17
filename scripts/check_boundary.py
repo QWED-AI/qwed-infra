@@ -58,6 +58,18 @@ def _build_alias_map(tree: ast.Module) -> dict[str, str]:
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             for alias in node.names:
+                if alias.name == "*":
+                    if module == "subprocess":
+                        for call in FORBIDDEN_CALLS:
+                            if call.startswith("subprocess."):
+                                alias_map[call.split(".", 1)[1]] = call
+                    elif module == "os":
+                        alias_map["system"] = "os.system"
+                        alias_map["popen"] = "os.popen"
+                    elif module == "builtins":
+                        alias_map["eval"] = "builtins.eval"
+                        alias_map["exec"] = "builtins.exec"
+                    continue
                 local = alias.asname or alias.name
                 full = f"{module}.{alias.name}" if module else alias.name
                 alias_map[local] = full
@@ -85,6 +97,18 @@ def check_file(filepath: Path) -> list[str]:
         if not isinstance(node, ast.Call):
             continue
 
+        # Check for shell=True on every call node, even unresolvable ones
+        if any(
+            keyword.arg == "shell"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in node.keywords
+        ):
+            errors.append(
+                f"  [SHELL_TRUE] {relpath}:{node.lineno}: "
+                "Disallowed shell=True argument"
+            )
+
         call_names = get_call_names(node)
         if not call_names:
             continue
@@ -106,7 +130,7 @@ def check_file(filepath: Path) -> list[str]:
 
             # bare eval/exec → always dangerous (resolved catches aliased imports)
             if leaf in {"eval", "exec"}:
-                if "." not in resolved or resolved.startswith("builtins."):
+                if "." not in resolved or resolved.startswith("builtins.") or resolved.startswith("__builtins__."):
                     errors.append(
                         f"  [BARE_EVAL] {relpath}:{node.lineno}: "
                         f"Disallowed call '{name}()'"
