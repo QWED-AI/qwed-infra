@@ -91,7 +91,17 @@ def check_file(filepath: Path) -> list[str]:
 
         for name in call_names:
             # Resolve through import alias map to catch bypasses
+            # Handles: `from subprocess import run; run(...)` → run → subprocess.run
             resolved = alias_map.get(name, name)
+
+            # Also resolve module aliases in dotted names
+            # Handles: `import subprocess as sp; sp.run(...)` → sp → subprocess
+            if resolved == name and "." in name:
+                parts = name.split(".", 1)
+                resolved_module = alias_map.get(parts[0])
+                if resolved_module is not None:
+                    resolved = f"{resolved_module}.{parts[1]}"
+
             leaf = resolved.split(".")[-1]
 
             # bare eval/exec → always dangerous (resolved catches aliased imports)
@@ -107,14 +117,6 @@ def check_file(filepath: Path) -> list[str]:
                 errors.append(
                     f"  [BARE_SHELL] {relpath}:{node.lineno}: "
                     f"Disallowed call '{name}()'"
-                )
-
-            # Unresolved bare leaf name — possible import alias bypass
-            # Skip if already caught above (prevents double-report for e.g. popen)
-            elif "." not in name and name in FORBIDDEN_LEAF_NAMES:
-                errors.append(
-                    f"  [BARE_SHELL] {relpath}:{node.lineno}: "
-                    f"Disallowed bare call '{name}()' — possible import alias"
                 )
 
     return errors
