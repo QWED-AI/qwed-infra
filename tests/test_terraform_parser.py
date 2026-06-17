@@ -23,6 +23,7 @@ def test_parse_simple_infrastructure(mock_hcl2_load, parser, tmp_path):
     }
     
     resources = parser.parse_directory(str(tmp_path))
+    mock_hcl2_load.assert_called_once()
     
     # Verify Instances
     instances = resources["instances"]

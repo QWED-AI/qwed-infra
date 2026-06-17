@@ -33,12 +33,12 @@ Verification is the primary operation. Execution happens only after verification
 succeeds.
 
 **Allowed:**
-```
+```text
 Input → Verify → Execute
 ```
 
 **Forbidden:**
-```
+```text
 Input → Execute → Verify later
 ```
 

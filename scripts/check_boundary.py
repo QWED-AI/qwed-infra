@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SRC_DIR = REPO_ROOT / "qwed_infra"
+SCAN_ROOT = REPO_ROOT
+EXCLUDED_DIRS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 
 # Full call names that are forbidden (dotted names)
 FORBIDDEN_CALLS = {
@@ -46,6 +47,23 @@ def get_call_names(node: ast.Call) -> list[str]:
     return names
 
 
+def _build_alias_map(tree: ast.Module) -> dict[str, str]:
+    """Build map of local name → original dotted name from import statements."""
+    alias_map = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name
+                alias_map[local] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                local = alias.asname or alias.name
+                full = f"{module}.{alias.name}" if module else alias.name
+                alias_map[local] = full
+    return alias_map
+
+
 def check_file(filepath: Path) -> list[str]:
     errors = []
     try:
@@ -57,7 +75,11 @@ def check_file(filepath: Path) -> list[str]:
         )
         return errors
 
-    relpath = filepath.relative_to(REPO_ROOT).as_posix()
+    try:
+        relpath = filepath.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        relpath = filepath.as_posix()
+    alias_map = _build_alias_map(tree)
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -68,25 +90,27 @@ def check_file(filepath: Path) -> list[str]:
             continue
 
         for name in call_names:
-            leaf = name.split(".")[-1]
+            # Resolve through import alias map to catch bypasses
+            resolved = alias_map.get(name, name)
+            leaf = resolved.split(".")[-1]
 
-            # bare eval/exec → always dangerous
+            # bare eval/exec → always dangerous (resolved catches aliased imports)
             if leaf in {"eval", "exec"}:
-                if "." not in name or name.startswith("builtins."):
+                if "." not in resolved or resolved.startswith("builtins."):
                     errors.append(
                         f"  [BARE_EVAL] {relpath}:{node.lineno}: "
                         f"Disallowed call '{name}()'"
                     )
 
-            # os.system, subprocess.*, popen (dotted names)
-            if name in FORBIDDEN_CALLS:
+            # os.system, subprocess.*, popen (dotted or alias-resolved names)
+            if resolved in FORBIDDEN_CALLS:
                 errors.append(
                     f"  [BARE_SHELL] {relpath}:{node.lineno}: "
                     f"Disallowed call '{name}()'"
                 )
 
-            # Import-alias bypass: from subprocess import run; run("cmd")
-            # Skip if already caught by the dotted-name check above (prevents double-report)
+            # Unresolved bare leaf name — possible import alias bypass
+            # Skip if already caught above (prevents double-report for e.g. popen)
             elif "." not in name and name in FORBIDDEN_LEAF_NAMES:
                 errors.append(
                     f"  [BARE_SHELL] {relpath}:{node.lineno}: "
@@ -98,7 +122,15 @@ def check_file(filepath: Path) -> list[str]:
 
 def main() -> int:
     errors: list[str] = []
-    for pyfile in sorted(SRC_DIR.rglob("*.py")):
+
+    if not SCAN_ROOT.exists() or not SCAN_ROOT.is_dir():
+        print(" QWED-Infra Boundary check FAILED")
+        print(f"  [CONFIG_ERROR] Scan root not found or not a directory: {SCAN_ROOT}")
+        return 1
+
+    for pyfile in sorted(SCAN_ROOT.rglob("*.py")):
+        if any(part in EXCLUDED_DIRS for part in pyfile.parts):
+            continue
         errors.extend(check_file(pyfile))
 
     if errors:

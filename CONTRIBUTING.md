@@ -107,7 +107,7 @@ git push origin feat/your-feature
 
 ### Commit Message Format
 
-```
+```text
 type(scope): description
 
 feat(iam): add condition key wildcard matching
@@ -120,7 +120,7 @@ docs: update architecture diagram
 
 ## Repository Structure
 
-```
+```text
 qwed-infra/
 ├── qwed_infra/
 │   ├── guards/
