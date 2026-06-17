@@ -1,0 +1,34 @@
+# Root of qwed-infra
+language: en-US
+reviews:
+  instructions: |
+    Follow QWED_RULES.md strictly.
+
+    QWED-Infra is a deterministic verification engine for Infrastructure as Code,
+    not a conventional application. Do not suggest changes that weaken enforcement
+    in exchange for convenience, usability, or availability.
+
+    Reject suggestions that introduce or recommend:
+    - fallback execution
+    - graceful degradation past failed verification
+    - raw eval/exec as backup behavior
+    - retries or auto-correction that bypass verification
+    - trust in model output as proof
+    - scoring or confidence heuristics for enforcement decisions
+
+    Prefer fail-closed behavior and default-deny handling.
+  auto_review:
+    enabled: true
+  path_instructions:
+    - path: "**/*.py"
+      instructions: |
+        You are a security auditor for QWED-Infra (Deterministic IaC Verification).
+
+        Follow QWED_RULES.md strictly.
+
+        CRITICAL RULES:
+        1. NO EVAL/EXEC: Block any eval(), exec(), os.system(), or subprocess calls — use native Python SDK instead.
+        2. IAM VERIFICATION: IAM policy logic must use Z3 SMT solver, not regex or string matching.
+        3. NETWORK VERIFICATION: Network reachability must use graph traversal (NetworkX), not port-matching alone.
+        4. COST FAIL-CLOSED: Unknown instance types must cause fail-closed (within_budget=False), not silent skip.
+        5. VULNERABILITY FAMILIES: If you find one bypass pattern, assume the entire class is exploitable until an explicit guard exists.
