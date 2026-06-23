@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 import hcl2
@@ -60,7 +61,10 @@ class TerraformParser:
         if errors:
             raise ParseError(errors)
 
-        # 2. Normalize to QWED Internal Schema
+        # 2. Normalize to QWED Internal Schema — continue even if HCL parse
+        # errors occurred, so normalization errors are aggregated together.
+        # If HCL errors exist, normalization runs on the partial HCL data
+        # (which may be empty), but the final ParseError will still be raised.
         qwed_resources: Dict[str, list] = {
             "instances": [],
             "policies": [],
@@ -177,11 +181,18 @@ class TerraformParser:
     def _validate_statements(
         res_name: str, doc: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Validate that a parsed policy document contains a Statement list.
+        """Validate that a parsed policy document contains a Statement list
+        where each entry is a dict.
+
+        Also recursively rejects unresolved Terraform interpolation (${...})
+        in any string value within the policy document.
 
         Raises:
-            ValueError: if 'Statement' is missing or not a list.
+            ValueError: if 'Statement' is missing, not a list, contains
+                non-dict entries, or contains unresolved interpolation.
         """
+        TerraformParser._reject_unresolved_interpolation(res_name, doc)
+
         if "Statement" not in doc:
             raise ValueError(
                 f"aws_iam_policy '{res_name}': policy document has no "
@@ -193,7 +204,35 @@ class TerraformParser:
                 f"aws_iam_policy '{res_name}': 'Statement' is not a list "
                 f"— cannot extract."
             )
+        for index, statement in enumerate(statements):
+            if not isinstance(statement, dict):
+                raise ValueError(
+                    f"aws_iam_policy '{res_name}': Statement[{index}] is "
+                    f"{type(statement).__name__}, not a dict — cannot extract."
+                )
+            TerraformParser._reject_unresolved_interpolation(res_name, statement)
         return statements
+
+    @staticmethod
+    def _reject_unresolved_interpolation(res_name: str, value: Any) -> None:
+        """Recursively reject Terraform interpolation syntax (${...}) in values.
+
+        Unresolved interpolation (e.g. ``${var.action}``) means the policy
+        cannot be deterministically verified — the actual value is unknown at
+        parse time. Fail-closed per QWED_RULES Principle 2.
+        """
+        if isinstance(value, str) and "${" in value:
+            raise ValueError(
+                f"aws_iam_policy '{res_name}': policy contains unresolved "
+                f"Terraform interpolation '{value}' — cannot extract "
+                f"deterministically. Resolve variables before parsing."
+            )
+        if isinstance(value, dict):
+            for nested in value.values():
+                TerraformParser._reject_unresolved_interpolation(res_name, nested)
+        elif isinstance(value, list):
+            for nested in value:
+                TerraformParser._reject_unresolved_interpolation(res_name, nested)
 
     @staticmethod
     def _extract_policy_document(
@@ -272,21 +311,22 @@ class TerraformParser:
     ) -> Dict[str, Any]:
         """Parse the inner content of a ${jsonencode(...)} interpolation.
 
-        hcl2 converts HCL map syntax to JSON-like key-value pairs with escaped
-        quotes (e.g. ``{\"Version\": \"2012-10-17\", ...}``). This is already
-        valid JSON after extraction, so we parse it directly.
+        hcl2 converts HCL map syntax to Python literal syntax with single
+        quotes (e.g. ``{'Version': '2012-10-17', ...}``) — NOT valid JSON.
+        We use ``ast.literal_eval`` which safely evaluates Python literals
+        (dict, list, str, num, bool, None) without executing arbitrary code.
 
         Raises:
             ValueError: if the content cannot be parsed as a dict.
         """
         content = content.strip()
         try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
+            parsed = ast.literal_eval(content)
+        except (ValueError, SyntaxError) as exc:
             raise ValueError(
                 f"aws_iam_policy '{res_name}': jsonencode content is not "
-                f"valid JSON — {exc}. This may indicate unsupported HCL "
-                f"constructs inside the jsonencode call."
+                f"valid Python literal — {exc}. This may indicate unsupported "
+                f"HCL constructs inside the jsonencode call."
             ) from exc
 
         if not isinstance(parsed, dict):

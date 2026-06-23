@@ -195,6 +195,47 @@ class TestNormalizeResource:
         with pytest.raises(ValueError, match="not a dict"):
             parser._normalize_resource("aws_instance", "web", "not_a_dict")
 
+    def test_aws_iam_policy_statement_non_dict_fails_closed(self, parser):
+        """Statement entry that is not a dict must fail-closed (CodeRabbit security)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow"}, "not_a_dict"]
+        }
+        with pytest.raises(ValueError, match="not a dict"):
+            parser._normalize_resource("aws_iam_policy", "bad_stmt", {"policy": policy_body})
+
+    def test_aws_iam_policy_interpolation_in_action_fails_closed(self, parser):
+        """Unresolved Terraform interpolation in policy values must fail-closed (CodeRabbit security)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "${var.admin_actions}", "Resource": "*"}]
+        }
+        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+            parser._normalize_resource("aws_iam_policy", "interp", {"policy": policy_body})
+
+    def test_aws_iam_policy_interpolation_in_resource_fails_closed(self, parser):
+        """Unresolved interpolation in Resource field must fail-closed."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "${var.bucket_arn}"}]
+        }
+        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+            parser._normalize_resource("aws_iam_policy", "interp_res", {"policy": policy_body})
+
+    def test_aws_iam_policy_interpolation_in_nested_dict_fails_closed(self, parser):
+        """Interpolation in nested Condition dict must fail-closed (recursive check)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "s3:*",
+                "Resource": "*",
+                "Condition": {"StringEquals": {"aws:SourceIp": "${var.allowed_ip}"}}
+            }]
+        }
+        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+            parser._normalize_resource("aws_iam_policy", "nested_interp", {"policy": policy_body})
+
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="no 'Statement' key"):
