@@ -183,6 +183,18 @@ class TestNormalizeResource:
         result = parser._normalize_resource("aws_instance", "web", {"instance_type": ["t3.micro"]})
         assert result["data"]["instance_type"] == "t3.micro"
 
+    def test_config_list_wrapped_dict(self, parser):
+        """hcl2 on some versions wraps the entire config in a list — must unwrap (CI fix)."""
+        config = [{"instance_type": "t3.micro", "count": 2}]
+        result = parser._normalize_resource("aws_instance", "web", config)
+        assert result["data"]["instance_type"] == "t3.micro"
+        assert result["data"]["count"] == 2
+
+    def test_config_non_dict_non_list_fails_closed(self, parser):
+        """Config that is neither dict nor list must fail-closed."""
+        with pytest.raises(ValueError, match="not a dict"):
+            parser._normalize_resource("aws_instance", "web", "not_a_dict")
+
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="no 'Statement' key"):

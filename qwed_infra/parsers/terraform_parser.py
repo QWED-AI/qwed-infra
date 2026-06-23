@@ -92,7 +92,7 @@ class TerraformParser:
         return qwed_resources
 
     def _normalize_resource(
-        self, res_type: str, res_name: str, config: Dict[str, Any]
+        self, res_type: str, res_name: str, config: Any
     ) -> Optional[Dict[str, Any]]:
         """
         Maps generic Terraform resource types to QWED schema.
@@ -102,6 +102,14 @@ class TerraformParser:
                 IAM policy body cannot be extracted). The caller catches this
                 and converts it into a ParseError entry.
         """
+        # hcl2 may wrap the entire config dict in a single-element list
+        if isinstance(config, list) and len(config) == 1:
+            config = config[0]
+        if not isinstance(config, dict):
+            raise ValueError(
+                f"{res_type}.{res_name}: config is {type(config).__name__}, "
+                f"not a dict — cannot normalize."
+            )
         config = self._unwrap_hcl2_values(config)
 
         # --- Compute ---
