@@ -1,4 +1,5 @@
 import json
+import re
 import hcl2
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -45,16 +46,16 @@ class TerraformParser:
 
         # 1. Read and merge generic HCL structure
         for tf_file in sorted(path.glob("*.tf")):
-            with open(tf_file, "r") as f:
-                try:
+            try:
+                with open(tf_file, "r") as f:
                     data = hcl2.load(f)
                     for key, val in data.items():
                         if key not in combined_hcl:
                             combined_hcl[key] = []
                         combined_hcl[key].extend(val)
-                except Exception as e:  # noqa: BLE001
-                    errors.append(f"Failed to parse {tf_file.name}: {e}")
-                    continue
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"Failed to parse {tf_file.name}: {e}")
+                continue
 
         if errors:
             raise ParseError(errors)
@@ -212,7 +213,7 @@ class TerraformParser:
         if isinstance(policy_body, dict):
             return policy_body
 
-        # Case 2: heredoc or raw JSON string
+        # Case 2: heredoc, raw JSON string, or ${jsonencode(...)} interpolation
         if isinstance(policy_body, str):
             stripped = policy_body.strip()
             if not stripped:
@@ -220,6 +221,15 @@ class TerraformParser:
                     f"aws_iam_policy '{res_name}': policy body is an empty "
                     f"string — cannot extract statements."
                 )
+
+            # hcl2 returns jsonencode(...) as "${jsonencode({...})}" — extract
+            # the inner JSON-like content and convert HCL map syntax to JSON
+            if stripped.startswith("${jsonencode(") and stripped.endswith(")}"):
+                inner = stripped[len("${jsonencode("):-len(")}")]
+                parsed = TerraformParser._parse_hcl_jsonencode_content(
+                    res_name, inner
+                )
+                return parsed
 
             # hcl2 sometimes wraps strings in ${...} interpolation syntax
             if stripped.startswith("${") and stripped.endswith("}"):
@@ -247,3 +257,33 @@ class TerraformParser:
             f"{type(policy_body).__name__} — cannot extract. Supported forms: "
             f"jsonencode dict, JSON string, or heredoc."
         )
+
+    @staticmethod
+    def _parse_hcl_jsonencode_content(
+        res_name: str, content: str
+    ) -> Dict[str, Any]:
+        """Parse the inner content of a ${jsonencode(...)} interpolation.
+
+        hcl2 converts HCL map syntax to JSON-like key-value pairs with escaped
+        quotes (e.g. ``{\"Version\": \"2012-10-17\", ...}``). This is already
+        valid JSON after extraction, so we parse it directly.
+
+        Raises:
+            ValueError: if the content cannot be parsed as a dict.
+        """
+        content = content.strip()
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"aws_iam_policy '{res_name}': jsonencode content is not "
+                f"valid JSON — {exc}. This may indicate unsupported HCL "
+                f"constructs inside the jsonencode call."
+            ) from exc
+
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"aws_iam_policy '{res_name}': jsonencode content parsed to "
+                f"{type(parsed).__name__}, not a dict — cannot extract."
+            )
+        return parsed

@@ -15,7 +15,7 @@ def run_demo():
     try:
         resources = parser.parse_directory(demo_dir)
     except ParseError as e:
-        print(f"❌ DEMO FAILED: Terraform parse error(s):")
+        print("❌ DEMO FAILED: Terraform parse error(s):")
         for err in e.errors:
             print(f"   - {err}")
         sys.exit(1)

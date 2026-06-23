@@ -349,3 +349,87 @@ class TestParserFailClosed:
         assert len(policies[0]["Statement"]) == 1
         assert policies[0]["Statement"][0]["Action"] == "*"
         assert policies[0]["Statement"][0]["Resource"] == "*"
+
+    def test_jsonencode_policy_real_hcl2_integration(self, parser, tmp_path):
+        """Integration test with real hcl2.load — jsonencode returns ${jsonencode(...)} string.
+
+        This test does NOT mock hcl2. It verifies that the parser correctly
+        handles the actual hcl2 output format where jsonencode({...}) is
+        returned as a string interpolation, not a parsed dict.
+        (Sentry CRITICAL + CodeRabbit Major)
+        """
+        tf_file = tmp_path / "iam.tf"
+        tf_file.write_text('''
+resource "aws_iam_policy" "admin_policy" {
+  name = "admin_policy"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = "*"
+        Resource = "*"
+      }
+    ]
+  })
+}
+''')
+
+        resources = parser.parse_directory(str(tmp_path))
+        policies = resources["policies"]
+        assert len(policies) == 1
+        assert policies[0]["id"] == "admin_policy"
+        assert policies[0]["Version"] == "2012-10-17"
+        assert len(policies[0]["Statement"]) == 1
+        stmt = policies[0]["Statement"][0]
+        assert stmt["Effect"] == "Allow"
+        assert stmt["Action"] == "*"
+        assert stmt["Resource"] == "*"
+
+    def test_jsonencode_policy_real_hcl2_multiple_statements(self, parser, tmp_path):
+        """Integration test: real hcl2 with multiple policy statements."""
+        tf_file = tmp_path / "iam.tf"
+        tf_file.write_text('''
+resource "aws_iam_policy" "multi_policy" {
+  name = "multi"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = "s3:GetObject"
+        Resource = "arn:aws:s3:::bucket/*"
+      },
+      {
+        Effect = "Deny"
+        Action = "iam:DeleteUser"
+        Resource = "*"
+      }
+    ]
+  })
+}
+''')
+
+        resources = parser.parse_directory(str(tmp_path))
+        policies = resources["policies"]
+        assert len(policies) == 1
+        assert len(policies[0]["Statement"]) == 2
+        assert policies[0]["Statement"][0]["Effect"] == "Allow"
+        assert policies[0]["Statement"][1]["Effect"] == "Deny"
+
+    def test_instance_real_hcl2_integration(self, parser, tmp_path):
+        """Integration test: real hcl2 parsing of aws_instance with list-wrapped values."""
+        tf_file = tmp_path / "main.tf"
+        tf_file.write_text('''
+resource "aws_instance" "web" {
+  instance_type = "t3.micro"
+  count = 2
+}
+''')
+
+        resources = parser.parse_directory(str(tmp_path))
+        instances = resources["instances"]
+        assert len(instances) == 1
+        assert instances[0]["id"] == "web"
+        assert instances[0]["instance_type"] == "t3.micro"
+        assert instances[0]["count"] == 2
