@@ -1,6 +1,7 @@
 import os
 import sys
 from qwed_infra import IamGuard, NetworkGuard, CostGuard, TerraformParser
+from qwed_infra.parsers.terraform_parser import ParseError
 
 def run_demo():
     print("🚀 Starting QWED-Infra Verification Demo")
@@ -11,7 +12,14 @@ def run_demo():
     demo_dir = os.path.dirname(os.path.abspath(__file__))
     print(f"📂 Parsing Terraform in: {demo_dir}")
     
-    resources = parser.parse_directory(demo_dir)
+    try:
+        resources = parser.parse_directory(demo_dir)
+    except ParseError as e:
+        print(f"❌ DEMO FAILED: Terraform parse error(s):")
+        for err in e.errors:
+            print(f"   - {err}")
+        sys.exit(1)
+
     print(f"   Found {len(resources['instances'])} instances, {len(resources['policies'])} policies.")
     
     guards_failed = 0

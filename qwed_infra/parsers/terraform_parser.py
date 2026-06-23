@@ -15,7 +15,10 @@ class ParseError(Exception):
 
     def __init__(self, errors: List[str]):
         self.errors = errors
-        super().__init__(f"Parse failed with {len(errors)} error(s):\n" + "\n".join(f"  - {e}" for e in errors))
+        super().__init__(
+            f"Parse failed with {len(errors)} error(s):\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
 
 
 class TerraformParser:
@@ -42,14 +45,14 @@ class TerraformParser:
 
         # 1. Read and merge generic HCL structure
         for tf_file in sorted(path.glob("*.tf")):
-            with open(tf_file, 'r') as f:
+            with open(tf_file, "r") as f:
                 try:
                     data = hcl2.load(f)
                     for key, val in data.items():
                         if key not in combined_hcl:
                             combined_hcl[key] = []
                         combined_hcl[key].extend(val)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     errors.append(f"Failed to parse {tf_file.name}: {e}")
                     continue
 
@@ -57,12 +60,12 @@ class TerraformParser:
             raise ParseError(errors)
 
         # 2. Normalize to QWED Internal Schema
-        qwed_resources = {
+        qwed_resources: Dict[str, list] = {
             "instances": [],
             "policies": [],
             "subnets": [],
             "security_groups": [],
-            "volumes": []
+            "volumes": [],
         }
 
         resources = combined_hcl.get("resource", [])
@@ -71,21 +74,25 @@ class TerraformParser:
             for res_type, res_dict in resource_block.items():
                 for res_name, config in res_dict.items():
                     try:
-                        normalized = self._normalize_resource(res_type, res_name, config)
+                        normalized = self._normalize_resource(
+                            res_type, res_name, config
+                        )
                         if normalized:
                             cat = normalized["category"]
                             qwed_resources[cat].append(normalized["data"])
-                    except ParseError:
-                        raise
-                    except Exception as e:
-                        errors.append(f"Failed to normalize {res_type}.{res_name}: {e}")
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(
+                            f"Failed to normalize {res_type}.{res_name}: {e}"
+                        )
 
         if errors:
             raise ParseError(errors)
 
         return qwed_resources
 
-    def _normalize_resource(self, res_type: str, res_name: str, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _normalize_resource(
+        self, res_type: str, res_name: str, config: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         """
         Maps generic Terraform resource types to QWED schema.
 
@@ -94,6 +101,8 @@ class TerraformParser:
                 IAM policy body cannot be extracted). The caller catches this
                 and converts it into a ParseError entry.
         """
+        config = self._unwrap_hcl2_values(config)
+
         # --- Compute ---
         if res_type == "aws_instance":
             instance_type = config.get("instance_type")
@@ -107,22 +116,23 @@ class TerraformParser:
                 "data": {
                     "id": res_name,
                     "instance_type": instance_type,
-                    "count": config.get("count", 1)
-                }
+                    "count": config.get("count", 1),
+                },
             }
 
         # --- IAM ---
         if res_type == "aws_iam_policy":
-            policy_json = config.get("policy")
-            statements = self._extract_policy_statements(res_name, policy_json)
-
+            policy_body = config.get("policy")
+            policy_doc = self._extract_policy_document(res_name, policy_body)
             return {
                 "category": "policies",
                 "data": {
                     "id": res_name,
-                    "Version": "2012-10-17",
-                    "Statement": statements
-                }
+                    "Version": policy_doc.get("Version", "2012-10-17"),
+                    "Statement": self._validate_statements(
+                        res_name, policy_doc
+                    ),
+                },
             }
 
         # --- Storage ---
@@ -131,21 +141,63 @@ class TerraformParser:
                 "category": "volumes",
                 "data": {
                     "id": res_name,
-                    "size_gb": config.get("size", 10)
-                }
+                    "size_gb": config.get("size", 10),
+                },
             }
 
         return None
 
     @staticmethod
-    def _extract_policy_statements(res_name: str, policy_body: Any) -> List[Dict[str, Any]]:
+    def _unwrap_hcl2_values(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Unwrap hcl2 list-wrapped attribute values.
+
+        python-hcl2 wraps all attribute values in single-element lists
+        (e.g. ``"t3.micro"`` becomes ``["t3.micro"]``). This unwraps
+        single-element lists to their scalar value so downstream code
+        can type-check normally.
         """
-        Deterministically extract IAM policy statements from a Terraform
+        unwrapped: Dict[str, Any] = {}
+        for key, val in config.items():
+            if isinstance(val, list) and len(val) == 1:
+                unwrapped[key] = val[0]
+            else:
+                unwrapped[key] = val
+        return unwrapped
+
+    @staticmethod
+    def _validate_statements(
+        res_name: str, doc: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Validate that a parsed policy document contains a Statement list.
+
+        Raises:
+            ValueError: if 'Statement' is missing or not a list.
+        """
+        if "Statement" not in doc:
+            raise ValueError(
+                f"aws_iam_policy '{res_name}': policy document has no "
+                f"'Statement' key — cannot extract."
+            )
+        statements = doc["Statement"]
+        if not isinstance(statements, list):
+            raise ValueError(
+                f"aws_iam_policy '{res_name}': 'Statement' is not a list "
+                f"— cannot extract."
+            )
+        return statements
+
+    @staticmethod
+    def _extract_policy_document(
+        res_name: str, policy_body: Any
+    ) -> Dict[str, Any]:
+        """
+        Deterministically extract the IAM policy document from a Terraform
         aws_iam_policy resource.
 
-        hcl2 parses jsonencode({...}) as a dict directly. Heredoc and raw
-        string policies come through as strings. Variable interpolation
-        (file(), var.x) cannot be resolved and must fail-closed.
+        hcl2 may return the policy as a dict (jsonencode parsed), a JSON
+        string (heredoc), or a ``${jsonencode(...)}`` interpolation string.
+        Variable interpolation (file(), var.x) cannot be resolved and must
+        fail-closed.
 
         Raises:
             ValueError: if the policy body cannot be faithfully extracted.
@@ -158,18 +210,7 @@ class TerraformParser:
 
         # Case 1: hcl2 parsed jsonencode(...) as a dict
         if isinstance(policy_body, dict):
-            if "Statement" not in policy_body:
-                raise ValueError(
-                    f"aws_iam_policy '{res_name}': jsonencode policy body has "
-                    f"no 'Statement' key — cannot extract."
-                )
-            statements = policy_body["Statement"]
-            if not isinstance(statements, list):
-                raise ValueError(
-                    f"aws_iam_policy '{res_name}': jsonencode policy 'Statement' "
-                    f"is not a list — cannot extract."
-                )
-            return statements
+            return policy_body
 
         # Case 2: heredoc or raw JSON string
         if isinstance(policy_body, str):
@@ -193,20 +234,14 @@ class TerraformParser:
                     f"like file() or var.x) — {exc}. Refusing to emit a placeholder."
                 ) from exc
 
-            if "Statement" not in parsed:
+            if not isinstance(parsed, dict):
                 raise ValueError(
-                    f"aws_iam_policy '{res_name}': parsed JSON policy has no "
-                    f"'Statement' key — cannot extract."
+                    f"aws_iam_policy '{res_name}': parsed JSON is not a dict "
+                    f"— cannot extract policy document."
                 )
-            statements = parsed["Statement"]
-            if not isinstance(statements, list):
-                raise ValueError(
-                    f"aws_iam_policy '{res_name}': parsed JSON 'Statement' "
-                    f"is not a list — cannot extract."
-                )
-            return statements
+            return parsed
 
-        # Case 3: unsupported type (e.g. list, int, custom object)
+        # Case 3: unsupported type
         raise ValueError(
             f"aws_iam_policy '{res_name}': policy body is of type "
             f"{type(policy_body).__name__} — cannot extract. Supported forms: "

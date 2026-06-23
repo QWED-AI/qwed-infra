@@ -79,6 +79,15 @@ class TestNormalizeResource:
         assert result["data"]["Statement"][0]["Action"] == "*"
         assert result["data"]["Statement"][0]["Resource"] == "*"
 
+    def test_aws_iam_policy_custom_version_extracted(self, parser):
+        """Version should be extracted from the actual policy document, not hardcoded (Greptile P2)."""
+        policy_body = {
+            "Version": "2024-01-01",
+            "Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]
+        }
+        result = parser._normalize_resource("aws_iam_policy", "v2_policy", {"policy": policy_body})
+        assert result["data"]["Version"] == "2024-01-01"
+
     def test_aws_iam_policy_json_string(self, parser):
         """Raw JSON string policy — parsed and statements extracted."""
         policy_str = json.dumps({
@@ -92,6 +101,15 @@ class TestNormalizeResource:
         assert result["category"] == "policies"
         assert len(result["data"]["Statement"]) == 1
         assert result["data"]["Statement"][0]["Action"] == "s3:GetObject"
+
+    def test_aws_iam_policy_json_string_custom_version(self, parser):
+        """Version extracted from JSON string policy (Greptile P2)."""
+        policy_str = json.dumps({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect": "Deny", "Action": "*", "Resource": "*"}]
+        })
+        result = parser._normalize_resource("aws_iam_policy", "custom_v", {"policy": policy_str})
+        assert result["data"]["Version"] == "2024-01-01"
 
     def test_aws_iam_policy_heredoc_with_interpolation_wrapper(self, parser):
         """hcl2 sometimes wraps heredoc strings in ${...} — should be unwrapped."""
@@ -136,6 +154,34 @@ class TestNormalizeResource:
         """Unsupported policy body type must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="cannot extract"):
             parser._normalize_resource("aws_iam_policy", "list_policy", {"policy": [1, 2, 3]})
+
+    def test_aws_iam_policy_hcl2_list_wrapped_dict(self, parser):
+        """hcl2 wraps attributes in single-element lists — must unwrap (CodeRabbit Critical)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]
+        }
+        # Simulate hcl2 wrapping the policy value in a list
+        result = parser._normalize_resource("aws_iam_policy", "wrapped", {"policy": [policy_body]})
+        assert result is not None
+        assert len(result["data"]["Statement"]) == 1
+        assert result["data"]["Statement"][0]["Action"] == "*"
+
+    def test_aws_iam_policy_hcl2_list_wrapped_string(self, parser):
+        """hcl2 list-wrapped JSON string must be unwrapped and parsed (CodeRabbit Critical)."""
+        policy_str = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Deny", "Action": "iam:*", "Resource": "*"}]
+        })
+        result = parser._normalize_resource("aws_iam_policy", "wrapped_str", {"policy": [policy_str]})
+        assert result is not None
+        assert len(result["data"]["Statement"]) == 1
+        assert result["data"]["Statement"][0]["Effect"] == "Deny"
+
+    def test_aws_instance_hcl2_list_wrapped_type(self, parser):
+        """hcl2 wraps instance_type in a list — must unwrap (CodeRabbit Critical)."""
+        result = parser._normalize_resource("aws_instance", "web", {"instance_type": ["t3.micro"]})
+        assert result["data"]["instance_type"] == "t3.micro"
 
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
@@ -198,15 +244,15 @@ class TestParserFailClosed:
     @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
     def test_one_bad_file_among_multiple_raises(self, mock_hcl2_load, parser, tmp_path):
         """One bad .tf file among multiple must fail the entire parse (Issue #8)."""
-        (tmp_path / "good.tf").write_text("")
-        (tmp_path / "bad.tf").write_text("")
+        (tmp_path / "aaa_good.tf").write_text("")
+        (tmp_path / "zzz_bad.tf").write_text("")
 
         call_count = [0]
         def side_effect(f):
             call_count[0] += 1
             if call_count[0] == 1:
                 return {"resource": [{"aws_instance": {"web": {"instance_type": "t3.micro"}}}]}
-            raise Exception("HCL parse error in bad.tf")
+            raise Exception("HCL parse error in bad file")
 
         mock_hcl2_load.side_effect = side_effect
 
