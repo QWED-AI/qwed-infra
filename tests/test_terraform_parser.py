@@ -268,6 +268,70 @@ class TestNormalizeResource:
         result = TerraformParser._normalize_hcl2_value('""nested""')
         assert result == '"nested"'
 
+    def test_hcl_map_to_json_handles_escaped_quotes(self, parser):
+        """_hcl_map_to_json must handle escaped quotes in string values (Sentry HIGH)."""
+        hcl_content = r'{Description = "He said \"hello\""}'
+        result = TerraformParser._hcl_map_to_json(hcl_content)
+        # The escaped quotes must be preserved inside the string
+        assert r'\"hello\"' in result
+        # Key must be quoted
+        assert '"Description":' in result
+
+    def test_aws_policy_variables_allowed(self, parser):
+        """AWS IAM policy variables like ${aws:username} must NOT be rejected (Sentry HIGH)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::bucket/${aws:username}/*"
+            }]
+        }
+        result = parser._normalize_resource("aws_iam_policy", "abac", {"policy": policy_body})
+        assert result is not None
+        assert len(result["data"]["Statement"]) == 1
+
+    def test_aws_saml_variables_allowed(self, parser):
+        """AWS SAML policy variables must NOT be rejected."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "sts:AssumeRoleWithSAML",
+                "Resource": "*",
+                "Condition": {"StringEquals": {"SAML:aud": "https://signin.aws.amazon.com/saml"}}
+            }]
+        }
+        result = parser._normalize_resource("aws_iam_policy", "saml", {"policy": policy_body})
+        assert result is not None
+
+    def test_terraform_var_interpolation_still_rejected(self, parser):
+        """Terraform ${var.x} interpolation must still be rejected."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "${var.action}", "Resource": "*"}]
+        }
+        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+            parser._normalize_resource("aws_iam_policy", "var_interp", {"policy": policy_body})
+
+    def test_terraform_local_interpolation_rejected(self, parser):
+        """Terraform ${local.x} interpolation must be rejected."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "${local.bucket}"}]
+        }
+        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+            parser._normalize_resource("aws_iam_policy", "local_interp", {"policy": policy_body})
+
+    def test_unknown_interpolation_without_colon_rejected(self, parser):
+        """Unknown ${...} without a colon must fail-closed."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "${something}"}]
+        }
+        with pytest.raises(ValueError, match="unresolved interpolation"):
+            parser._normalize_resource("aws_iam_policy", "unknown_interp", {"policy": policy_body})
+
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="no 'Statement' key"):

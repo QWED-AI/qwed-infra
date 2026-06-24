@@ -1,6 +1,5 @@
 import ast
 import json
-import re
 import hcl2
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -254,22 +253,64 @@ class TerraformParser:
     def _reject_unresolved_interpolation(res_name: str, value: Any) -> None:
         """Recursively reject Terraform interpolation syntax (${...}) in values.
 
-        Unresolved interpolation (e.g. ``${var.action}``) means the policy
-        cannot be deterministically verified — the actual value is unknown at
-        parse time. Fail-closed per QWED_RULES Principle 2.
+        Unresolved Terraform interpolation (e.g. ``${var.action}``) means the
+        policy cannot be deterministically verified — the actual value is
+        unknown at parse time. Fail-closed per QWED_RULES Principle 2.
+
+        However, AWS IAM policy variables (e.g. ``${aws:username}``,
+        ``${saml:sub}``) are valid runtime-resolved variables that AWS
+        evaluates at request time — these are NOT Terraform interpolation
+        and must be allowed through.
+
+        Terraform interpolation prefixes: ``var.``, ``local.``, ``module.``,
+        ``data.``, ``aws_*.``, ``file()``, ``jsonencode()`` etc.
+        AWS policy variables: ``${aws:*}``, ``${saml:*}``, ``${cognito:*}``,
+        ``${iam:*}``, ``${redshift:*}``, ``${sourceIp}``, ``${epochTime}``,
+        ``${requestRegion}``, etc.
         """
         if isinstance(value, str) and "${" in value:
-            raise ValueError(
-                f"aws_iam_policy '{res_name}': policy contains unresolved "
-                f"Terraform interpolation '{value}' — cannot extract "
-                f"deterministically. Resolve variables before parsing."
-            )
+            TerraformParser._check_interpolation_value(res_name, value)
         if isinstance(value, dict):
             for nested in value.values():
                 TerraformParser._reject_unresolved_interpolation(res_name, nested)
         elif isinstance(value, list):
             for nested in value:
                 TerraformParser._reject_unresolved_interpolation(res_name, nested)
+
+    @staticmethod
+    def _check_interpolation_value(res_name: str, value: str) -> None:
+        """Check a single string for unresolved Terraform interpolation.
+
+        AWS policy variables are allowed. Terraform interpolation is rejected.
+        """
+        idx = 0
+        while True:
+            start = value.find("${", idx)
+            if start == -1:
+                return
+            end = value.find("}", start)
+            if end == -1:
+                return
+            inner = value[start + 2:end].strip()
+            # AWS policy variables: ${aws:username}, ${saml:sub}, etc.
+            # These contain a colon and are NOT Terraform interpolation.
+            if ":" in inner:
+                idx = end + 1
+                continue
+            # Terraform interpolation: ${var.name}, ${local.x}, ${module.y}
+            if inner.startswith(("var.", "local.", "module.", "data.")):
+                raise ValueError(
+                    f"aws_iam_policy '{res_name}': policy contains unresolved "
+                    f"Terraform interpolation '{value}' — cannot extract "
+                    f"deterministically. Resolve variables before parsing."
+                )
+            # Unknown ${...} without a colon — fail-closed
+            raise ValueError(
+                f"aws_iam_policy '{res_name}': policy contains unresolved "
+                f"interpolation '${{{inner}}}' — cannot verify deterministically. "
+                f"If this is an AWS policy variable, it must use a colon "
+                f"(e.g. ${{aws:username}})."
+            )
 
     @staticmethod
     def _extract_policy_document(
@@ -402,7 +443,8 @@ class TerraformParser:
         - ``=`` outside quotes (after identifiers) → ``:``
 
         Values inside quoted strings (e.g. ``"Team=backend"``) are
-        left untouched.
+        left untouched. Escaped quotes (``\\"``) inside strings are
+        handled correctly.
 
         (Sentry HIGH — regex-based replacement corrupted values
         containing ``=`` inside quoted strings.)
@@ -413,37 +455,48 @@ class TerraformParser:
         while i < len(content):
             ch = content[i]
 
-            if ch == '"':
-                in_string = not in_string
-                result.append(ch)
-                i += 1
-                continue
-
             if in_string:
                 result.append(ch)
+                if ch == '\\' and i + 1 < len(content):
+                    result.append(content[i + 1])
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = False
                 i += 1
                 continue
 
-            # Outside a string: check for unquoted identifier followed by =
-            if ch.isalpha() or ch == '_':
-                j = i
-                while j < len(content) and (
-                    content[j].isalnum() or content[j] == '_'
-                ):
-                    j += 1
-                # Look ahead for = (possibly with whitespace)
-                k = j
-                while k < len(content) and content[k] in (' ', '\t'):
-                    k += 1
-                if k < len(content) and content[k] == '=':
-                    identifier = content[i:j]
-                    result.append('"')
-                    result.append(identifier)
-                    result.append('":')
-                    i = k + 1
-                    continue
+            if ch == '"':
+                in_string = True
+                result.append(ch)
+                i += 1
+                continue
 
-            result.append(ch)
-            i += 1
-
+            i = TerraformParser._try_identifier_equals(result, content, i)
         return ''.join(result)
+
+    @staticmethod
+    def _try_identifier_equals(
+        result: List[str], content: str, i: int
+    ) -> int:
+        """Try to match an unquoted identifier followed by = at position i.
+
+        If matched, appends ``"identifier":`` to result and returns the
+        index after the ``=``. Otherwise, appends the single character and
+        returns i+1.
+        """
+        ch = content[i]
+        if ch.isalpha() or ch == '_':
+            j = i
+            while j < len(content) and (content[j].isalnum() or content[j] == '_'):
+                j += 1
+            k = j
+            while k < len(content) and content[k] in (' ', '\t'):
+                k += 1
+            if k < len(content) and content[k] == '=':
+                result.append('"')
+                result.append(content[i:j])
+                result.append('":')
+                return k + 1
+        result.append(ch)
+        return i + 1
