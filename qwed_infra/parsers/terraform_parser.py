@@ -290,7 +290,11 @@ class TerraformParser:
                 return
             end = TerraformParser._find_matching_brace(value, start + 2)
             if end == -1:
-                return
+                raise ValueError(
+                    f"aws_iam_policy '{res_name}': policy contains unterminated "
+                    f"interpolation in '{value}' — cannot verify "
+                    f"deterministically. Refusing to emit a placeholder."
+                )
             inner = value[start + 2:end].strip()
             # AWS policy variables: ${aws:username}, ${saml:sub}, etc.
             # Strictly whitelist known AWS namespaces to avoid false-negatives

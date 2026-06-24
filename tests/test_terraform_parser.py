@@ -350,6 +350,15 @@ class TestNormalizeResource:
         with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "for_expr", {"policy": policy_body})
 
+    def test_unterminated_interpolation_rejected(self, parser):
+        """Unterminated ${ without closing } must fail-closed, not silently pass (Greptile P1)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "${*", "Resource": "*"}]
+        }
+        with pytest.raises(ValueError, match="unterminated interpolation"):
+            parser._normalize_resource("aws_iam_policy", "unterminated", {"policy": policy_body})
+
     @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
     def test_parse_and_normalization_errors_aggregated(self, mock_hcl2_load, parser, tmp_path):
         """Both HCL parse errors and normalization errors in one ParseError (Sentry MEDIUM)."""
