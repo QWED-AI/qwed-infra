@@ -332,6 +332,15 @@ class TestNormalizeResource:
         with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "unknown_interp", {"policy": policy_body})
 
+    def test_nested_brace_interpolation_rejected(self, parser):
+        """${merge({...}, var.x)} with colons inside nested braces must not bypass (Greptile P1)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": '${merge({"Action:": "s3:*"}, var.base)}', "Resource": "*"}]
+        }
+        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+            parser._normalize_resource("aws_iam_policy", "nested_brace", {"policy": policy_body})
+
     def test_jsonencode_inner_extraction_with_paren_in_value(self, parser):
         """_extract_jsonencode_inner must handle ) inside string values (Sentry MEDIUM)."""
         raw = '${jsonencode({Version = "2012-10-17", Statement = [{Resource = "arn:aws:s3:::bucket)"}]})}'

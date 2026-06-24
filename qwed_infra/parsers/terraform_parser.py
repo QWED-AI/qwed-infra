@@ -285,19 +285,21 @@ class TerraformParser:
         """Check a single string for unresolved Terraform interpolation.
 
         AWS policy variables are allowed. Terraform interpolation is rejected.
+        Uses brace-depth tracking to correctly handle nested braces (e.g.
+        ``${merge({...}, var.x)}`` — Greptile P1).
         """
         idx = 0
         while True:
             start = value.find("${", idx)
             if start == -1:
                 return
-            end = value.find("}", start)
+            end = TerraformParser._find_matching_brace(value, start + 2)
             if end == -1:
                 return
             inner = value[start + 2:end].strip()
             # AWS policy variables: ${aws:username}, ${saml:sub}, etc.
-            # These contain a colon and are NOT Terraform interpolation.
-            if ":" in inner:
+            # These contain a colon AND have no nested braces.
+            if ":" in inner and "{" not in inner:
                 idx = end + 1
                 continue
             # Terraform interpolation: ${var.name}, ${local.x}, ${module.y}
@@ -307,6 +309,14 @@ class TerraformParser:
                     f"Terraform interpolation '{value}' — cannot extract "
                     f"deterministically. Resolve variables before parsing."
                 )
+            # Contains nested braces (e.g. merge({...}, ...)) — Terraform
+            # function call, not an AWS policy variable. Fail-closed.
+            if "{" in inner or "(" in inner:
+                raise ValueError(
+                    f"aws_iam_policy '{res_name}': policy contains unresolved "
+                    f"Terraform interpolation '{value}' — contains function "
+                    f"calls or nested maps. Resolve before parsing."
+                )
             # Unknown ${...} without a colon — fail-closed
             raise ValueError(
                 f"aws_iam_policy '{res_name}': policy contains unresolved "
@@ -314,6 +324,26 @@ class TerraformParser:
                 f"If this is an AWS policy variable, it must use a colon "
                 f"(e.g. ${{aws:username}})."
             )
+
+    @staticmethod
+    def _find_matching_brace(value: str, start: int) -> int:
+        """Find the matching closing ``}`` for a ``${`` at the given start
+        position. Tracks brace depth to handle nested braces (e.g.
+        ``${merge({...}, var.x)}``).
+
+        Returns the index of the matching ``}`` or -1 if not found.
+        """
+        depth = 1
+        i = start
+        while i < len(value):
+            if value[i] == '{':
+                depth += 1
+            elif value[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+        return -1
 
     @staticmethod
     def _extract_policy_document(
@@ -512,34 +542,39 @@ class TerraformParser:
         i = 0
         while i < len(content):
             ch = content[i]
-
             if ch in ('"', "'"):
-                quote = ch
-                # Convert single quotes to double quotes for valid JSON output
-                result.append('"')
-                i += 1
-                while i < len(content):
-                    if content[i] == '\\' and i + 1 < len(content):
-                        # Preserve escape sequences
-                        result.append(content[i])
-                        result.append(content[i + 1])
-                        i += 2
-                        continue
-                    if content[i] == quote:
-                        result.append('"')
-                        i += 1
-                        break
-                    # Escape any unescaped double quotes inside the value
-                    if content[i] == '"' and quote == "'":
-                        result.append('\\"')
-                        i += 1
-                        continue
-                    result.append(content[i])
-                    i += 1
+                i = TerraformParser._copy_string_to_json(result, content, i)
                 continue
-
             i = TerraformParser._try_identifier_equals(result, content, i)
         return ''.join(result)
+
+    @staticmethod
+    def _copy_string_to_json(result: List[str], content: str, i: int) -> int:
+        """Copy a quoted string from content into result, converting single
+        quotes to double quotes for valid JSON output.
+
+        Returns the index after the closing quote. Handles escape sequences
+        and escapes any unescaped double quotes inside single-quoted strings.
+        """
+        quote = content[i]
+        result.append('"')
+        i += 1
+        while i < len(content):
+            if content[i] == '\\' and i + 1 < len(content):
+                result.append(content[i])
+                result.append(content[i + 1])
+                i += 2
+                continue
+            if content[i] == quote:
+                result.append('"')
+                return i + 1
+            if content[i] == '"' and quote == "'":
+                result.append('\\"')
+                i += 1
+                continue
+            result.append(content[i])
+            i += 1
+        return i
 
     @staticmethod
     def _try_identifier_equals(
