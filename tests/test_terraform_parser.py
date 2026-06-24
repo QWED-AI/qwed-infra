@@ -341,6 +341,28 @@ class TestNormalizeResource:
         with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
             parser._normalize_resource("aws_iam_policy", "nested_brace", {"policy": policy_body})
 
+    @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
+    def test_parse_and_normalization_errors_aggregated(self, mock_hcl2_load, parser, tmp_path):
+        """Both HCL parse errors and normalization errors in one ParseError (Sentry MEDIUM)."""
+        (tmp_path / "bad.tf").write_text("")
+        (tmp_path / "good.tf").write_text("")
+
+        call_count = [0]
+        def side_effect(f):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("HCL syntax error")
+            return {"resource": [{"aws_instance": {"web": {}}}]}
+
+        mock_hcl2_load.side_effect = side_effect
+
+        with pytest.raises(ParseError) as exc_info:
+            parser.parse_directory(str(tmp_path))
+
+        all_errors = " ".join(exc_info.value.errors)
+        assert "HCL syntax error" in all_errors
+        assert "no instance_type" in all_errors
+
     def test_jsonencode_inner_extraction_with_paren_in_value(self, parser):
         """_extract_jsonencode_inner must handle ) inside string values (Sentry MEDIUM)."""
         raw = '${jsonencode({Version = "2012-10-17", Statement = [{Resource = "arn:aws:s3:::bucket)"}]})}'

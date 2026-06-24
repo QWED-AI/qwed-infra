@@ -61,13 +61,9 @@ class TerraformParser:
                 errors.append(f"Failed to parse {tf_file.name}: {e}")
                 continue
 
-        if errors:
-            raise ParseError(errors)
-
-        # 2. Normalize to QWED Internal Schema — continue even if HCL parse
-        # errors occurred, so normalization errors are aggregated together.
-        # If HCL errors exist, normalization runs on the partial HCL data
-        # (which may be empty), but the final ParseError will still be raised.
+        # 2. Normalize to QWED Internal Schema — run normalization even if
+        # HCL parse errors occurred, so all errors (parse + normalization)
+        # are aggregated into a single ParseError.
         qwed_resources: Dict[str, list] = {
             "instances": [],
             "policies": [],
