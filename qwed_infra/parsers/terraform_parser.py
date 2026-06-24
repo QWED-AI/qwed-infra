@@ -1,5 +1,6 @@
 import ast
 import json
+import re
 import hcl2
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -49,6 +50,7 @@ class TerraformParser:
             try:
                 with open(tf_file, "r") as f:
                     data = hcl2.load(f)
+                    data = self._normalize_hcl2_output(data)
                     for key, val in data.items():
                         if key not in combined_hcl:
                             combined_hcl[key] = []
@@ -93,6 +95,42 @@ class TerraformParser:
             raise ParseError(errors)
 
         return qwed_resources
+
+    @staticmethod
+    def _normalize_hcl2_output(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize hcl2 output to handle version-specific quirks.
+
+        Some hcl2 versions (notably on CI/Linux) return:
+        - Resource type/name keys with embedded double quotes:
+          ``"\\\"aws_iam_policy\\\""`` instead of ``"aws_iam_policy"``
+        - String attribute values with embedded double quotes:
+          ``"\\\"t3.micro\\\""`` instead of ``"t3.micro"``
+        - A ``__is_block__`` marker key in resource config dicts
+
+        This method strips the embedded quotes and removes ``__is_block__``
+        so downstream normalization sees clean keys and values.
+        """
+        result: Dict[str, Any] = {}
+        for key, val in data.items():
+            clean_key = key.strip('"')
+            result[clean_key] = TerraformParser._normalize_hcl2_value(val)
+        return result
+
+    @staticmethod
+    def _normalize_hcl2_value(val: Any) -> Any:
+        """Recursively normalize an hcl2 value (strip quotes, remove __is_block__)."""
+        if isinstance(val, dict):
+            cleaned = {}
+            for k, v in val.items():
+                if k == "__is_block__":
+                    continue
+                cleaned[k.strip('"')] = TerraformParser._normalize_hcl2_value(v)
+            return cleaned
+        if isinstance(val, list):
+            return [TerraformParser._normalize_hcl2_value(v) for v in val]
+        if isinstance(val, str):
+            return val.strip('"')
+        return val
 
     def _normalize_resource(
         self, res_type: str, res_name: str, config: Any
@@ -310,23 +348,40 @@ class TerraformParser:
     ) -> Dict[str, Any]:
         """Parse the inner content of a ${jsonencode(...)} interpolation.
 
-        hcl2 converts HCL map syntax to Python literal syntax with single
-        quotes (e.g. ``{'Version': '2012-10-17', ...}``) — NOT valid JSON.
-        We use ``ast.literal_eval`` which safely evaluates Python literals
-        (dict, list, str, num, bool, None) without executing arbitrary code.
+        hcl2 outputs the jsonencode content in HCL map syntax, which uses
+        ``=`` instead of ``:`` for key-value pairs and may have unquoted
+        keys: ``{Version = "2012-10-17", ...}``. This is neither valid JSON
+        nor valid Python.
+
+        We convert HCL map syntax to JSON by:
+        1. Quoting unquoted keys (``Version`` → ``"Version"``)
+        2. Replacing ``=`` with ``:`` between keys and values
+        3. Parsing the resulting JSON
 
         Raises:
             ValueError: if the content cannot be parsed as a dict.
         """
         content = content.strip()
+
+        # Convert HCL map syntax to JSON:
+        # {Version = "x"} → {"Version": "x"}
+        # Match unquoted word keys followed by = (not inside string values)
+        json_content = re.sub(
+            r'(\b[A-Za-z_]\w*)\s*=', r'"\1":', content
+        )
+
         try:
-            parsed = ast.literal_eval(content)
-        except (ValueError, SyntaxError) as exc:
-            raise ValueError(
-                f"aws_iam_policy '{res_name}': jsonencode content is not "
-                f"valid Python literal — {exc}. This may indicate unsupported "
-                f"HCL constructs inside the jsonencode call."
-            ) from exc
+            parsed = json.loads(json_content)
+        except json.JSONDecodeError:
+            # Fallback: try ast.literal_eval for Python literal syntax
+            try:
+                parsed = ast.literal_eval(content)
+            except (ValueError, SyntaxError) as exc:
+                raise ValueError(
+                    f"aws_iam_policy '{res_name}': jsonencode content is not "
+                    f"valid JSON or Python literal — {exc}. This may indicate "
+                    f"unsupported HCL constructs inside the jsonencode call."
+                ) from exc
 
         if not isinstance(parsed, dict):
             raise ValueError(
