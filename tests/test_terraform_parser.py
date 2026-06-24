@@ -360,6 +360,37 @@ class TestNormalizeResource:
         inner = TerraformParser._extract_jsonencode_inner("test", raw)
         assert "hello)" in inner
 
+    def test_hcl_map_to_json_single_quoted_equals(self, parser):
+        """_hcl_map_to_json must handle = inside single-quoted strings (Sentry HIGH)."""
+        hcl_content = "{Tag = 'key=value'}"
+        result = TerraformParser._hcl_map_to_json(hcl_content)
+        assert "key=value" in result
+        assert '"Tag":' in result
+
+    def test_hcl_map_to_json_double_equals_not_assignment(self, parser):
+        """_hcl_map_to_json must not treat == as key-value assignment (Sentry HIGH)."""
+        hcl_content = "{a == b}"
+        result = TerraformParser._hcl_map_to_json(hcl_content)
+        # == should NOT be converted to a key-value pair
+        assert '"a":' not in result
+        assert "==" in result
+
+    @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
+    def test_non_list_top_level_block_handled(self, mock_hcl2_load, parser, tmp_path):
+        """variable/locals blocks (dicts, not lists) must not crash (Sentry CRITICAL)."""
+        tf_file = tmp_path / "test.tf"
+        tf_file.write_text("")
+
+        mock_hcl2_load.return_value = {
+            "variable": {"instance_type": {"type": "string"}},
+            "locals": {"default_type": "t3.micro"},
+            "resource": [{"aws_instance": {"web": {"instance_type": "t3.micro"}}}],
+        }
+
+        resources = parser.parse_directory(str(tmp_path))
+        assert len(resources["instances"]) == 1
+        assert resources["instances"][0]["instance_type"] == "t3.micro"
+
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="no 'Statement' key"):

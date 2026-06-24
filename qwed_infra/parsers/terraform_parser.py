@@ -53,7 +53,10 @@ class TerraformParser:
                     for key, val in data.items():
                         if key not in combined_hcl:
                             combined_hcl[key] = []
-                        combined_hcl[key].extend(val)
+                        if isinstance(val, list):
+                            combined_hcl[key].extend(val)
+                        else:
+                            combined_hcl[key].append(val)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"Failed to parse {tf_file.name}: {e}")
                 continue
@@ -507,25 +510,23 @@ class TerraformParser:
         """
         result: List[str] = []
         i = 0
-        in_string = False
         while i < len(content):
             ch = content[i]
 
-            if in_string:
-                result.append(ch)
-                if ch == '\\' and i + 1 < len(content):
-                    result.append(content[i + 1])
-                    i += 2
-                    continue
-                if ch == '"':
-                    in_string = False
-                i += 1
-                continue
-
-            if ch == '"':
-                in_string = True
+            if ch in ('"', "'"):
+                quote = ch
                 result.append(ch)
                 i += 1
+                while i < len(content):
+                    result.append(content[i])
+                    if content[i] == '\\' and i + 1 < len(content):
+                        result.append(content[i + 1])
+                        i += 2
+                        continue
+                    if content[i] == quote:
+                        i += 1
+                        break
+                    i += 1
                 continue
 
             i = TerraformParser._try_identifier_equals(result, content, i)
@@ -549,7 +550,9 @@ class TerraformParser:
             k = j
             while k < len(content) and content[k] in (' ', '\t'):
                 k += 1
-            if k < len(content) and content[k] == '=':
+            if k < len(content) and content[k] == '=' and (
+                k + 1 >= len(content) or content[k + 1] != '='
+            ):
                 result.append('"')
                 result.append(content[i:j])
                 result.append('":')
