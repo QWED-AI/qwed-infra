@@ -515,17 +515,26 @@ class TerraformParser:
 
             if ch in ('"', "'"):
                 quote = ch
-                result.append(ch)
+                # Convert single quotes to double quotes for valid JSON output
+                result.append('"')
                 i += 1
                 while i < len(content):
-                    result.append(content[i])
                     if content[i] == '\\' and i + 1 < len(content):
+                        # Preserve escape sequences
+                        result.append(content[i])
                         result.append(content[i + 1])
                         i += 2
                         continue
                     if content[i] == quote:
+                        result.append('"')
                         i += 1
                         break
+                    # Escape any unescaped double quotes inside the value
+                    if content[i] == '"' and quote == "'":
+                        result.append('\\"')
+                        i += 1
+                        continue
+                    result.append(content[i])
                     i += 1
                 continue
 

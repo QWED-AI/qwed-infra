@@ -364,8 +364,24 @@ class TestNormalizeResource:
         """_hcl_map_to_json must handle = inside single-quoted strings (Sentry HIGH)."""
         hcl_content = "{Tag = 'key=value'}"
         result = TerraformParser._hcl_map_to_json(hcl_content)
-        assert "key=value" in result
-        assert '"Tag":' in result
+        # Single quotes must be converted to double quotes for valid JSON
+        parsed = json.loads(result)
+        assert parsed["Tag"] == "key=value"
+
+    def test_hcl_map_to_json_single_quoted_produces_valid_json(self, parser):
+        """_hcl_map_to_json with single-quoted values must produce valid JSON (Sentry HIGH)."""
+        hcl_content = "{Version = '2012-10-17', Action = '*'}"
+        result = TerraformParser._hcl_map_to_json(hcl_content)
+        parsed = json.loads(result)
+        assert parsed["Version"] == "2012-10-17"
+        assert parsed["Action"] == "*"
+
+    def test_hcl_map_to_json_single_quote_with_double_quote_inside(self, parser):
+        """Single-quoted string containing double quotes must escape them."""
+        hcl_content = "{Desc = 'He said \"hi\"'}"
+        result = TerraformParser._hcl_map_to_json(hcl_content)
+        parsed = json.loads(result)
+        assert parsed["Desc"] == 'He said "hi"'
 
     def test_hcl_map_to_json_double_equals_not_assignment(self, parser):
         """_hcl_map_to_json must not treat == as key-value assignment (Sentry HIGH)."""
