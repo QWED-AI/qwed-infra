@@ -114,7 +114,7 @@ class TerraformParser:
         """
         result: Dict[str, Any] = {}
         for key, val in data.items():
-            clean_key = key.strip('"')
+            clean_key = key.removeprefix('"').removesuffix('"')
             result[clean_key] = TerraformParser._normalize_hcl2_value(val)
         return result
 
@@ -126,7 +126,7 @@ class TerraformParser:
             for k, v in val.items():
                 if k == "__is_block__":
                     continue
-                cleaned[k.strip('"')] = TerraformParser._normalize_hcl2_value(v)
+                cleaned[k.removeprefix('"').removesuffix('"')] = TerraformParser._normalize_hcl2_value(v)
             return cleaned
         if isinstance(val, list):
             return [TerraformParser._normalize_hcl2_value(v) for v in val]
