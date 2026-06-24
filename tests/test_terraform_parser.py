@@ -347,6 +347,19 @@ class TestNormalizeResource:
         with pytest.raises(ValueError, match="unterminated jsonencode"):
             TerraformParser._extract_jsonencode_inner("test", raw)
 
+    def test_jsonencode_inner_extraction_single_quoted_paren(self, parser):
+        """_extract_jsonencode_inner must handle ) inside single-quoted strings (Sentry HIGH)."""
+        raw = "${jsonencode({Resource = 'arn:aws:s3:::bucket)'})}"
+        inner = TerraformParser._extract_jsonencode_inner("test", raw)
+        assert "bucket)" in inner
+        assert inner.endswith("}")
+
+    def test_jsonencode_inner_extraction_escaped_quote(self, parser):
+        """_extract_jsonencode_inner must handle escaped quotes inside strings."""
+        raw = r'${jsonencode({Desc = "He said \"hello)\""})}'
+        inner = TerraformParser._extract_jsonencode_inner("test", raw)
+        assert "hello)" in inner
+
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="no 'Statement' key"):

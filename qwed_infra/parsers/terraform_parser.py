@@ -398,26 +398,18 @@ class TerraformParser:
         depth, and extracts the content between the opening ``(`` and
         its matching ``)``.
 
+        Handles both double-quoted and single-quoted strings.
+
         (Sentry MEDIUM — fixed-length suffix slicing was brittle.)
         """
         prefix = "${jsonencode("
         start = len(prefix)
         depth = 1
-        in_string = False
         i = start
         while i < len(raw):
             ch = raw[i]
-            if in_string:
-                if ch == '\\' and i + 1 < len(raw):
-                    i += 2
-                    continue
-                if ch == '"':
-                    in_string = False
-                i += 1
-                continue
-            if ch == '"':
-                in_string = True
-                i += 1
+            if ch in ('"', "'"):
+                i = TerraformParser._skip_string(raw, i, ch)
                 continue
             if ch == '(':
                 depth += 1
@@ -430,6 +422,22 @@ class TerraformParser:
             f"aws_iam_policy '{res_name}': unterminated jsonencode() — "
             f"no matching closing parenthesis found."
         )
+
+    @staticmethod
+    def _skip_string(raw: str, i: int, quote: str) -> int:
+        """Skip a quoted string starting at position i. Returns the index
+        after the closing quote. Handles escaped quotes (``\\"`` and ``\\'``).
+        """
+        i += 1
+        while i < len(raw):
+            ch = raw[i]
+            if ch == '\\' and i + 1 < len(raw):
+                i += 2
+                continue
+            if ch == quote:
+                return i + 1
+            i += 1
+        return i
 
     @staticmethod
     def _parse_hcl_jsonencode_content(
