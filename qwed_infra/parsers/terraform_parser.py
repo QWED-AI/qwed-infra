@@ -348,9 +348,12 @@ class TerraformParser:
                 )
 
             # hcl2 returns jsonencode(...) as "${jsonencode({...})}" — extract
-            # the inner JSON-like content and convert HCL map syntax to JSON
-            if stripped.startswith("${jsonencode(") and stripped.endswith(")}"):
-                inner = stripped[len("${jsonencode("):-len(")}")]
+            # the inner content by tracking parenthesis depth (not string
+            # slicing, which breaks on ) inside string values)
+            if stripped.startswith("${jsonencode("):
+                inner = TerraformParser._extract_jsonencode_inner(
+                    res_name, stripped
+                )
                 parsed = TerraformParser._parse_hcl_jsonencode_content(
                     res_name, inner
                 )
@@ -381,6 +384,51 @@ class TerraformParser:
             f"aws_iam_policy '{res_name}': policy body is of type "
             f"{type(policy_body).__name__} — cannot extract. Supported forms: "
             f"jsonencode dict, JSON string, or heredoc."
+        )
+
+    @staticmethod
+    def _extract_jsonencode_inner(res_name: str, raw: str) -> str:
+        """Extract the inner content of ``${jsonencode(...)}`` by tracking
+        parenthesis depth.
+
+        Simple string slicing (``raw[:-2]``) breaks when a string value
+        inside the jsonencode contains ``)`` — e.g. an ARN like
+        ``"arn:aws:s3:::bucket)"``. This method walks the content
+        character by character, tracking quote state and parenthesis
+        depth, and extracts the content between the opening ``(`` and
+        its matching ``)``.
+
+        (Sentry MEDIUM — fixed-length suffix slicing was brittle.)
+        """
+        prefix = "${jsonencode("
+        start = len(prefix)
+        depth = 1
+        in_string = False
+        i = start
+        while i < len(raw):
+            ch = raw[i]
+            if in_string:
+                if ch == '\\' and i + 1 < len(raw):
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = False
+                i += 1
+                continue
+            if ch == '"':
+                in_string = True
+                i += 1
+                continue
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    return raw[start:i]
+            i += 1
+        raise ValueError(
+            f"aws_iam_policy '{res_name}': unterminated jsonencode() — "
+            f"no matching closing parenthesis found."
         )
 
     @staticmethod

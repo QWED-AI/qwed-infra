@@ -332,6 +332,21 @@ class TestNormalizeResource:
         with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "unknown_interp", {"policy": policy_body})
 
+    def test_jsonencode_inner_extraction_with_paren_in_value(self, parser):
+        """_extract_jsonencode_inner must handle ) inside string values (Sentry MEDIUM)."""
+        raw = '${jsonencode({Version = "2012-10-17", Statement = [{Resource = "arn:aws:s3:::bucket)"}]})}'
+        inner = TerraformParser._extract_jsonencode_inner("test", raw)
+        # The inner content must include the full string value with )
+        assert "bucket)" in inner
+        # Must end with the closing brace, not the ) inside the string
+        assert inner.endswith("}")
+
+    def test_jsonencode_inner_extraction_unterminated_raises(self, parser):
+        """Unterminated jsonencode must raise ValueError."""
+        raw = '${jsonencode({Version = "x"'
+        with pytest.raises(ValueError, match="unterminated jsonencode"):
+            TerraformParser._extract_jsonencode_inner("test", raw)
+
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="no 'Statement' key"):
