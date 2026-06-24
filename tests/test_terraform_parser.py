@@ -237,6 +237,37 @@ class TestNormalizeResource:
         with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
             parser._normalize_resource("aws_iam_policy", "nested_interp", {"policy": policy_body})
 
+    def test_hcl_map_to_json_preserves_equals_in_strings(self, parser):
+        """_hcl_map_to_json must not corrupt = inside quoted string values (Sentry HIGH)."""
+        hcl_content = '{Version = "2012-10-17", Statement = [{Condition = {"StringEquals": {"aws:RequestTag/Team": "Team=backend"}}}]}'
+        result = TerraformParser._hcl_map_to_json(hcl_content)
+        # The value "Team=backend" must be preserved, not corrupted
+        assert "Team=backend" in result
+        # Keys must be quoted
+        assert '"Version":' in result
+        assert '"Statement":' in result
+        assert '"Condition":' in result
+
+    def test_hcl_map_to_json_basic_conversion(self, parser):
+        """_hcl_map_to_json converts unquoted keys and = to JSON syntax."""
+        hcl_content = '{Version = "2012-10-17", Action = "*"}'
+        result = TerraformParser._hcl_map_to_json(hcl_content)
+        parsed = json.loads(result)
+        assert parsed["Version"] == "2012-10-17"
+        assert parsed["Action"] == "*"
+
+    def test_normalize_hcl2_value_preserves_internal_quotes(self, parser):
+        """strip must use removeprefix/removesuffix, not strip (Sentry MEDIUM)."""
+        # A string like '"value"' should lose only the outer quotes
+        result = TerraformParser._normalize_hcl2_value('"test_value"')
+        assert result == "test_value"
+        # A string that doesn't start/end with quote should be unchanged
+        result = TerraformParser._normalize_hcl2_value('no_quotes')
+        assert result == "no_quotes"
+        # Only ONE pair of outer quotes removed, not all
+        result = TerraformParser._normalize_hcl2_value('""nested""')
+        assert result == '"nested"'
+
     def test_aws_iam_policy_dict_no_statement_fails_closed(self, parser):
         """Dict policy without Statement key must fail-closed (Issue #9)."""
         with pytest.raises(ValueError, match="no 'Statement' key"):

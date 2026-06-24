@@ -129,7 +129,7 @@ class TerraformParser:
         if isinstance(val, list):
             return [TerraformParser._normalize_hcl2_value(v) for v in val]
         if isinstance(val, str):
-            return val.strip('"')
+            return val.removeprefix('"').removesuffix('"')
         return val
 
     def _normalize_resource(
@@ -365,10 +365,9 @@ class TerraformParser:
 
         # Convert HCL map syntax to JSON:
         # {Version = "x"} → {"Version": "x"}
-        # Match unquoted word keys followed by = (not inside string values)
-        json_content = re.sub(
-            r'(\b[A-Za-z_]\w*)\s*=', r'"\1":', content
-        )
+        # Only replace = outside of quoted strings to avoid corrupting
+        # values like "Team=backend" (Sentry HIGH)
+        json_content = TerraformParser._hcl_map_to_json(content)
 
         try:
             parsed = json.loads(json_content)
@@ -389,3 +388,62 @@ class TerraformParser:
                 f"{type(parsed).__name__}, not a dict — cannot extract."
             )
         return parsed
+
+    @staticmethod
+    def _hcl_map_to_json(content: str) -> str:
+        """Convert HCL map syntax to JSON outside of quoted strings.
+
+        HCL uses ``=`` for key-value pairs and may have unquoted keys:
+        ``{Version = "x", Action = "*"}``
+
+        This function walks the content character by character, tracking
+        whether we're inside a quoted string, and only transforms:
+        - Unquoted identifiers followed by ``=`` → ``"identifier":``
+        - ``=`` outside quotes (after identifiers) → ``:``
+
+        Values inside quoted strings (e.g. ``"Team=backend"``) are
+        left untouched.
+
+        (Sentry HIGH — regex-based replacement corrupted values
+        containing ``=`` inside quoted strings.)
+        """
+        result: List[str] = []
+        i = 0
+        in_string = False
+        while i < len(content):
+            ch = content[i]
+
+            if ch == '"':
+                in_string = not in_string
+                result.append(ch)
+                i += 1
+                continue
+
+            if in_string:
+                result.append(ch)
+                i += 1
+                continue
+
+            # Outside a string: check for unquoted identifier followed by =
+            if ch.isalpha() or ch == '_':
+                j = i
+                while j < len(content) and (
+                    content[j].isalnum() or content[j] == '_'
+                ):
+                    j += 1
+                # Look ahead for = (possibly with whitespace)
+                k = j
+                while k < len(content) and content[k] in (' ', '\t'):
+                    k += 1
+                if k < len(content) and content[k] == '=':
+                    identifier = content[i:j]
+                    result.append('"')
+                    result.append(identifier)
+                    result.append('":')
+                    i = k + 1
+                    continue
+
+            result.append(ch)
+            i += 1
+
+        return ''.join(result)
