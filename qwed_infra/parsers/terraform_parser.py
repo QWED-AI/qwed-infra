@@ -260,16 +260,15 @@ class TerraformParser:
         policy cannot be deterministically verified — the actual value is
         unknown at parse time. Fail-closed per QWED_RULES Principle 2.
 
-        However, AWS IAM policy variables (e.g. ``${aws:username}``,
-        ``${saml:sub}``) are valid runtime-resolved variables that AWS
-        evaluates at request time — these are NOT Terraform interpolation
-        and must be allowed through.
+        AWS IAM policy variables (e.g. ``${aws:username}``, ``${saml:sub}``)
+        are valid runtime-resolved variables that AWS evaluates at request
+        time — these use a colon and are NOT Terraform interpolation, so
+        they are allowed through.
 
         Terraform interpolation prefixes: ``var.``, ``local.``, ``module.``,
-        ``data.``, ``aws_*.``, ``file()``, ``jsonencode()`` etc.
+        ``data.``, ``file()``, ``jsonencode()`` etc.
         AWS policy variables: ``${aws:*}``, ``${saml:*}``, ``${cognito:*}``,
-        ``${iam:*}``, ``${redshift:*}``, ``${sourceIp}``, ``${epochTime}``,
-        ``${requestRegion}``, etc.
+        ``${iam:*}``, ``${redshift:*}``, etc.
         """
         if isinstance(value, str) and "${" in value:
             TerraformParser._check_interpolation_value(res_name, value)
