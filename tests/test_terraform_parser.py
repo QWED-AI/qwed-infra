@@ -211,7 +211,7 @@ class TestNormalizeResource:
             "Version": "2012-10-17",
             "Statement": [{"Effect": "Allow", "Action": "${var.admin_actions}", "Resource": "*"}]
         }
-        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+        with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "interp", {"policy": policy_body})
 
     def test_aws_iam_policy_interpolation_in_resource_fails_closed(self, parser):
@@ -220,7 +220,7 @@ class TestNormalizeResource:
             "Version": "2012-10-17",
             "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "${var.bucket_arn}"}]
         }
-        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+        with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "interp_res", {"policy": policy_body})
 
     def test_aws_iam_policy_interpolation_in_nested_dict_fails_closed(self, parser):
@@ -234,7 +234,7 @@ class TestNormalizeResource:
                 "Condition": {"StringEquals": {"aws:SourceIp": "${var.allowed_ip}"}}
             }]
         }
-        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+        with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "nested_interp", {"policy": policy_body})
 
     def test_hcl_map_to_json_preserves_equals_in_strings(self, parser):
@@ -311,7 +311,7 @@ class TestNormalizeResource:
             "Version": "2012-10-17",
             "Statement": [{"Effect": "Allow", "Action": "${var.action}", "Resource": "*"}]
         }
-        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+        with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "var_interp", {"policy": policy_body})
 
     def test_terraform_local_interpolation_rejected(self, parser):
@@ -320,7 +320,7 @@ class TestNormalizeResource:
             "Version": "2012-10-17",
             "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "${local.bucket}"}]
         }
-        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+        with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "local_interp", {"policy": policy_body})
 
     def test_unknown_interpolation_without_colon_rejected(self, parser):
@@ -338,8 +338,17 @@ class TestNormalizeResource:
             "Version": "2012-10-17",
             "Statement": [{"Effect": "Allow", "Action": '${merge({"Action:": "s3:*"}, var.base)}', "Resource": "*"}]
         }
-        with pytest.raises(ValueError, match="unresolved Terraform interpolation"):
+        with pytest.raises(ValueError, match="unresolved interpolation"):
             parser._normalize_resource("aws_iam_policy", "nested_brace", {"policy": policy_body})
+
+    def test_for_expression_with_colon_rejected(self, parser):
+        """Terraform for-expressions with colons must not bypass the guard (Greptile P1)."""
+        policy_body = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "${[for s in var.actions : s]}", "Resource": "*"}]
+        }
+        with pytest.raises(ValueError, match="unresolved interpolation"):
+            parser._normalize_resource("aws_iam_policy", "for_expr", {"policy": policy_body})
 
     @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
     def test_parse_and_normalization_errors_aggregated(self, mock_hcl2_load, parser, tmp_path):

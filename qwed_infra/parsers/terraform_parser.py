@@ -293,32 +293,38 @@ class TerraformParser:
                 return
             inner = value[start + 2:end].strip()
             # AWS policy variables: ${aws:username}, ${saml:sub}, etc.
-            # These contain a colon AND have no nested braces.
-            if ":" in inner and "{" not in inner:
+            # Strictly whitelist known AWS namespaces to avoid false-negatives
+            # (e.g. Terraform for-expressions with colons bypass colon check).
+            # (Greptile P1 — for-expression bypass fix)
+            if TerraformParser._is_aws_policy_variable(inner):
                 idx = end + 1
                 continue
-            # Terraform interpolation: ${var.name}, ${local.x}, ${module.y}
-            if inner.startswith(("var.", "local.", "module.", "data.")):
-                raise ValueError(
-                    f"aws_iam_policy '{res_name}': policy contains unresolved "
-                    f"Terraform interpolation '{value}' — cannot extract "
-                    f"deterministically. Resolve variables before parsing."
-                )
-            # Contains nested braces (e.g. merge({...}, ...)) — Terraform
-            # function call, not an AWS policy variable. Fail-closed.
-            if "{" in inner or "(" in inner:
-                raise ValueError(
-                    f"aws_iam_policy '{res_name}': policy contains unresolved "
-                    f"Terraform interpolation '{value}' — contains function "
-                    f"calls or nested maps. Resolve before parsing."
-                )
-            # Unknown ${...} without a colon — fail-closed
+            # Everything else is unresolved interpolation — fail-closed
             raise ValueError(
                 f"aws_iam_policy '{res_name}': policy contains unresolved "
-                f"interpolation '${{{inner}}}' — cannot verify deterministically. "
-                f"If this is an AWS policy variable, it must use a colon "
-                f"(e.g. ${{aws:username}})."
+                f"interpolation '{value}' — cannot verify deterministically. "
+                f"Resolve Terraform variables before parsing, or use AWS "
+                f"policy variables with a namespace (e.g. ${{aws:username}})."
             )
+
+    @staticmethod
+    def _is_aws_policy_variable(inner: str) -> bool:
+        """Check if an ${...} value is a known AWS IAM policy variable.
+
+        AWS policy variables use a namespace prefix with a colon:
+        ``aws:username``, ``saml:sub``, ``cognito:username``, etc.
+
+        This whitelist prevents Terraform expressions that happen to contain
+        colons (e.g. ``[for s in var.actions : s]``) from bypassing the
+        interpolation guard. (Greptile P1)
+        """
+        AWS_PREFIXES = (
+            "aws:", "saml:", "cognito:", "iam:", "redshift:",
+            "s3:", "sts:", "ec2:", "waf:", "grafana:",
+        )
+        if "{" in inner or "[" in inner or "(" in inner:
+            return False
+        return inner.startswith(AWS_PREFIXES)
 
     @staticmethod
     def _find_matching_brace(value: str, start: int) -> int:
