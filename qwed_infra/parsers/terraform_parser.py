@@ -1,6 +1,5 @@
 import ast
 import json
-import re
 import hcl2
 from typing import Dict, Any, Optional, List
 from pathlib import Path
