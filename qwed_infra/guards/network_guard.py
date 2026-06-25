@@ -50,7 +50,7 @@ class NetworkGuard:
             for destination in routes:
                 target = routes[destination] # e.g. 'igw-123'
                 
-                if destination == "0.0.0.0/0" and target.startswith("igw"):
+                if destination in ("0.0.0.0/0", "::/0") and target.startswith("igw"):
                     # Route to Internet
                     self.graph.add_edge(subnet_id, "internet", via=target)
                     self.graph.add_edge("internet", subnet_id, via=target) # Assume stateful return for now implies reachability? No, let's keep it directed.
@@ -80,7 +80,12 @@ class NetworkGuard:
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes")
         else:
-            # Internal source — verify destination subnet exists in infra
+            # Internal source — verify source is a valid IP address
+            try:
+                ipaddress.ip_address(source)
+            except ValueError:
+                return ComputedPath(reachable=False, path=[], reason=f"Invalid internal source: '{source}'")
+            # Verify destination subnet exists in infra
             dest_exists = any(s["id"] == destination for s in resources.get("subnets", []))
             if not dest_exists:
                 return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets")
@@ -101,9 +106,6 @@ class NetworkGuard:
         # Check if ANY attached SG allows ingress on this port
         ingress_allowed = False
 
-        # Determine the source IP for CIDR matching
-        source_ip = "0.0.0.0" if source == "internet" else source
-
         for sg_id in target_sgs:
             rules = security_groups.get(sg_id, {}).get("ingress", [])
             for rule in rules:
@@ -121,8 +123,11 @@ class NetworkGuard:
 
                 try:
                     network = ipaddress.ip_network(rule_cidr, strict=False)
-                    addr = ipaddress.ip_address(source_ip)
-                    cidr_match = addr in network
+                    if source == "internet":
+                        cidr_match = network.is_global
+                    else:
+                        addr = ipaddress.ip_address(source)
+                        cidr_match = addr in network
                 except (ValueError, TypeError):
                     # If CIDR or IP is unparseable, fail-closed
                     cidr_match = False

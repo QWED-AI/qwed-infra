@@ -176,6 +176,53 @@ def test_internet_cidr_still_works(guard, internal_infra):
     assert result.reachable is True
 
 
+def test_internet_specific_public_cidr_allowed(guard, internal_infra):
+    """Internet source with specific public CIDR (8.8.8.0/24) must be allowed."""
+    infra = {
+        "subnets": [{"id": "subnet-public", "security_groups": ["sg-specific"]}],
+        "route_tables": [{"subnet_id": "subnet-public", "routes": {"0.0.0.0/0": "igw-main"}}],
+        "security_groups": {
+            "sg-specific": {"ingress": [{"port": 443, "cidr": "8.8.8.0/24"}]},
+        },
+    }
+    result = guard.verify_reachability(
+        infra, source="internet", destination="subnet-public", port=443
+    )
+    assert result.reachable is True
+    assert "Security Groups allow" in result.reason
+
+
+def test_internet_ipv6_wildcard_allowed(guard, internal_infra):
+    """Internet source against IPv6 ::/0 rule must be allowed (not silently blocked)."""
+    infra = {
+        "subnets": [{"id": "subnet-v6", "security_groups": ["sg-v6"]}],
+        "route_tables": [{"subnet_id": "subnet-v6", "routes": {"::/0": "igw-main"}}],
+        "security_groups": {
+            "sg-v6": {"ingress": [{"port": 443, "cidr": "::/0"}]},
+        },
+    }
+    result = guard.verify_reachability(
+        infra, source="internet", destination="subnet-v6", port=443
+    )
+    assert result.reachable is True
+
+
+def test_internet_reserved_cidr_blocked(guard, internal_infra):
+    """Reserved CIDR (0.0.0.0/8) must NOT match as internet-reachable."""
+    infra = {
+        "subnets": [{"id": "subnet-reserved", "security_groups": ["sg-reserved"]}],
+        "route_tables": [{"subnet_id": "subnet-reserved", "routes": {"0.0.0.0/0": "igw-main"}}],
+        "security_groups": {
+            "sg-reserved": {"ingress": [{"port": 443, "cidr": "0.0.0.0/8"}]},
+        },
+    }
+    result = guard.verify_reachability(
+        infra, source="internet", destination="subnet-reserved", port=443
+    )
+    assert result.reachable is False
+    assert "Security Group blocks" in result.reason
+
+
 def test_internet_blocked_by_cidr_restricted_sg(guard, internal_infra):
     """Internet source hitting CIDR-restricted SG (10.0.0.0/16) must be blocked."""
     result = guard.verify_reachability(
