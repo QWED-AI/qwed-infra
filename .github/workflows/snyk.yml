@@ -35,10 +35,16 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]" || pip install -e . || true
+          pip install -e ".[dev]"
+
+      - name: Check Snyk token
+        id: snyk_token_check
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: echo "configured=${{ env.SNYK_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
 
       - name: Snyk Python dependency scan
-        continue-on-error: true
+        if: steps.snyk_token_check.outputs.configured == 'true'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk test --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-python.sarif
@@ -58,8 +64,14 @@ jobs:
       - name: Install Snyk CLI
         run: npm install -g snyk
 
+      - name: Check Snyk token
+        id: snyk_token_check
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: echo "configured=${{ env.SNYK_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
       - name: Snyk IaC Terraform scan
-        continue-on-error: true
+        if: steps.snyk_token_check.outputs.configured == 'true'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk iac test demo/ --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-iac.sarif
@@ -79,8 +91,14 @@ jobs:
       - name: Install Snyk CLI
         run: npm install -g snyk
 
+      - name: Check Snyk token
+        id: snyk_token_check
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: echo "configured=${{ env.SNYK_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
       - name: Snyk Code analysis
-        continue-on-error: true
+        if: steps.snyk_token_check.outputs.configured == 'true'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk code test --org=${{ secrets.SNYK_ORG_ID }} --sarif-file-output=snyk-code.sarif
