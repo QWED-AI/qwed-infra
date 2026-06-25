@@ -245,3 +245,21 @@ def test_invalid_cidr_fails_closed(guard, internal_infra):
         infra, source="10.0.0.1", destination="subnet-bad", port=80
     )
     assert result.reachable is False
+
+
+def test_invalid_internal_source_rejected(guard, internal_infra):
+    """Non-IP internal source must fail-closed."""
+    result = guard.verify_reachability(
+        internal_infra, source="not-an-ip", destination="subnet-app", port=80
+    )
+    assert result.reachable is False
+    assert "Invalid internal source" in result.reason
+
+
+def test_internal_source_unknown_destination(guard, internal_infra):
+    """Internal source targeting non-existent subnet must fail-closed."""
+    result = guard.verify_reachability(
+        internal_infra, source="10.0.0.1", destination="subnet-ghost", port=80
+    )
+    assert result.reachable is False
+    assert "not found in subnets" in result.reason
