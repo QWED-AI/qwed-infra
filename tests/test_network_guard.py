@@ -176,8 +176,9 @@ def test_internet_cidr_still_works(guard, internal_infra):
     assert result.reachable is True
 
 
-def test_internet_specific_public_cidr_allowed(guard, internal_infra):
-    """Internet source with specific public CIDR (8.8.8.0/24) must be allowed."""
+def test_internet_specific_public_cidr_blocked(guard, internal_infra):
+    """Internet source with specific public CIDR (8.8.8.0/24) must be blocked
+    — restricted to that range, not open to any arbitrary internet host."""
     infra = {
         "subnets": [{"id": "subnet-public", "security_groups": ["sg-specific"]}],
         "route_tables": [{"subnet_id": "subnet-public", "routes": {"0.0.0.0/0": "igw-main"}}],
@@ -188,8 +189,8 @@ def test_internet_specific_public_cidr_allowed(guard, internal_infra):
     result = guard.verify_reachability(
         infra, source="internet", destination="subnet-public", port=443
     )
-    assert result.reachable is True
-    assert "Security Groups allow" in result.reason
+    assert result.reachable is False
+    assert "Security Group blocks" in result.reason
 
 
 def test_internet_ipv6_wildcard_allowed(guard, internal_infra):

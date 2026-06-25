@@ -124,7 +124,7 @@ class NetworkGuard:
                 try:
                     network = ipaddress.ip_network(rule_cidr, strict=False)
                     if source == "internet":
-                        cidr_match = rule_cidr in ("0.0.0.0/0", "::/0") or network.is_global
+                        cidr_match = rule_cidr in ("0.0.0.0/0", "::/0")
                     else:
                         addr = ipaddress.ip_address(source)
                         cidr_match = addr in network
