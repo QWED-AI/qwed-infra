@@ -1,4 +1,5 @@
 from typing import List, Dict, Any
+import ipaddress
 import networkx as nx
 from pydantic import BaseModel
 
@@ -49,7 +50,7 @@ class NetworkGuard:
             for destination in routes:
                 target = routes[destination] # e.g. 'igw-123'
                 
-                if destination == "0.0.0.0/0" and target.startswith("igw"):
+                if destination in ("0.0.0.0/0", "::/0") and target.startswith("igw"):
                     # Route to Internet
                     self.graph.add_edge(subnet_id, "internet", via=target)
                     self.graph.add_edge("internet", subnet_id, via=target) # Assume stateful return for now implies reachability? No, let's keep it directed.
@@ -68,12 +69,27 @@ class NetworkGuard:
         
         # 1. Build Graph for Routing
         self.build_graph(resources)
-        
+
         # 2. Check Physical Path (Routing)
-        try:
-            path = nx.shortest_path(self.graph, source, destination)
-        except nx.NetworkXNoPath:
-            return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes")
+        # For internet sources, check graph path (IGW routing)
+        # For internal sources (IP addresses), skip graph check — internal
+        # VPC routing is implicit and does not require an IGW route entry.
+        if source == "internet":
+            try:
+                path = nx.shortest_path(self.graph, source, destination)
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes")
+        else:
+            # Internal source — verify source is a valid IP address
+            try:
+                ipaddress.ip_address(source)
+            except ValueError:
+                return ComputedPath(reachable=False, path=[], reason=f"Invalid internal source: '{source}'")
+            # Verify destination subnet exists in infra
+            dest_exists = any(s["id"] == destination for s in resources.get("subnets", []))
+            if not dest_exists:
+                return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets")
+            path = [source, destination]
             
         # 3. Check Security Groups (Firewall Logic)
         # simplified: check destination ingress
@@ -89,38 +105,42 @@ class NetworkGuard:
         
         # Check if ANY attached SG allows ingress on this port
         ingress_allowed = False
-        
-        if source == "internet":
-            # Public Access Check
-            for sg_id in target_sgs:
-                rules = security_groups.get(sg_id, {}).get("ingress", [])
-                for rule in rules:
-                    # simplistic rule check
-                    rule_port = rule.get("port")
-                    rule_cidr = rule.get("cidr")
-                    
-                    port_match = (rule_port == port) or (rule_port == -1) # -1 is ALL
-                    cidr_match = (rule_cidr == "0.0.0.0/0" or rule_cidr == "::/0")
-                    
-                    if port_match and cidr_match:
-                        ingress_allowed = True
-                        break
-                if ingress_allowed: break
-        else:
-            # Internal Traffic: Also enforce SG rules for internal sources
-            for sg_id in target_sgs:
-                rules = security_groups.get(sg_id, {}).get("ingress", [])
-                for rule in rules:
-                    rule_port = rule.get("port")
-                    port_match = (rule_port == port) or (rule_port == -1)
-                    if port_match:
-                        ingress_allowed = True
-                        break
-                if ingress_allowed:
+
+        for sg_id in target_sgs:
+            rules = security_groups.get(sg_id, {}).get("ingress", [])
+            for rule in rules:
+                rule_port = rule.get("port")
+                rule_cidr = rule.get("cidr")
+
+                port_match = (rule_port == port) or (rule_port == -1)
+                if not port_match:
+                    continue
+
+                # CIDR check for ALL sources (internet and internal)
+                # Previously internal traffic skipped CIDR — false negative (#14)
+                if rule_cidr is None:
+                    continue
+
+                try:
+                    network = ipaddress.ip_network(rule_cidr, strict=False)
+                    if source == "internet":
+                        cidr_match = rule_cidr in ("0.0.0.0/0", "::/0")
+                    else:
+                        addr = ipaddress.ip_address(source)
+                        cidr_match = addr in network
+                except (ValueError, TypeError):
+                    # If CIDR or IP is unparseable, fail-closed
+                    cidr_match = False
+
+                if cidr_match:
+                    ingress_allowed = True
                     break
-            # If no security groups attached, deny by default (fail-secure)
-            if not target_sgs:
-                ingress_allowed = False
+            if ingress_allowed:
+                break
+
+        # If no security groups attached, deny by default (fail-secure)
+        if not target_sgs:
+            ingress_allowed = False
             
         if not ingress_allowed:
              return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}")
