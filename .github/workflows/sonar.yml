@@ -36,6 +36,7 @@ jobs:
           pytest --cov=qwed_infra --cov-report=xml --cov-report=term-missing tests/
 
       - name: Check Sonar token
+        if: always()
         id: sonar_token_check
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
