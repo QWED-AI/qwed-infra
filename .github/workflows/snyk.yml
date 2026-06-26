@@ -36,11 +36,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]" || pip install -e .
+          pip freeze > requirements.txt
 
       - name: Snyk Python dependency scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        run: snyk test --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-python.sarif
+        run: snyk test --file=requirements.txt --package-manager=pip --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-python.sarif
 
       - name: Upload Snyk Python results to GitHub Security
         uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4
