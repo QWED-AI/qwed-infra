@@ -97,12 +97,13 @@ class NetworkGuard:
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes", port=port, failure_code="no_route")
         else:
-            # Internal source — verify source is a valid IP address
+            # Internal source — verify source is a valid private IP address
             try:
-                ipaddress.ip_address(source)
+                addr = ipaddress.ip_address(source)
             except ValueError:
                 return ComputedPath(reachable=False, path=[], reason=f"Invalid internal source: '{source}'", port=port, failure_code="invalid_internal_source")
-            # Verify destination subnet exists in infra
+            if not addr.is_private:
+                return ComputedPath(reachable=False, path=[], reason=f"Internal source '{source}' is not a private IP", port=port, failure_code="invalid_internal_source")
             dest_exists = any(s["id"] == destination for s in resources.get("subnets", []))
             if not dest_exists:
                 return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets", port=port, failure_code="unknown_destination")

@@ -198,7 +198,9 @@ class InfraDiagnosticResult:
                     f"from_dict: invalid status {raw_status!r} — "
                     f"must be one of: {valid}."
                 ) from None
-        elif not isinstance(raw_status, InfraDiagnosticStatus):
+        elif isinstance(raw_status, InfraDiagnosticStatus):
+            status = raw_status
+        else:
             valid = ", ".join(s.value for s in InfraDiagnosticStatus)
             raise ValueError(
                 f"from_dict: invalid status type {type(raw_status).__name__} — "
