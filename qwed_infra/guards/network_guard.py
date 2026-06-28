@@ -3,17 +3,30 @@ import ipaddress
 import networkx as nx
 from pydantic import BaseModel
 
+from qwed_infra.audit import (
+    NETWORK_INVALID_INTERNAL,
+    NETWORK_NO_ROUTE,
+    NETWORK_REACHABILITY,
+    NETWORK_SG_INGRESS,
+    NETWORK_UNKNOWN_DEST,
+    build_trace,
+)
+from qwed_infra.diagnostics import InfraDiagnosticResult
+
 class NetworkNode(BaseModel):
+    model_config = {"extra": "forbid"}
     id: str
     type: str # 'subnet', 'internet', 'instance'
     security_groups: List[str] = []
 
 class Route(BaseModel):
+    model_config = {"extra": "forbid"}
     source: str
     destination: str
     target: str # e.g. 'igw', 'nat'
 
 class ComputedPath(BaseModel):
+    model_config = {"extra": "forbid"}
     reachable: bool
     path: List[str]
     reason: str
@@ -146,3 +159,43 @@ class NetworkGuard:
              return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}")
 
         return ComputedPath(reachable=True, path=path, reason="Route exists and Security Groups allow traffic")
+
+    @staticmethod
+    def to_diagnostic(result: ComputedPath) -> InfraDiagnosticResult:
+        """Convert a ComputedPath to an InfraDiagnosticResult."""
+        if result.reachable:
+            trace = build_trace(NETWORK_REACHABILITY, "ALLOWED")
+            return InfraDiagnosticResult.verified(
+                agent_message="Network reachability verified",
+                developer_fields={
+                    "constraint_id": "network_guard.verify_reachability",
+                    "reachable": result.reachable,
+                    "path": result.path,
+                    "reason": result.reason,
+                    "audit_trace": trace,
+                },
+                evidence={**trace, "path": result.path, "reason": result.reason},
+            )
+
+        # Determine the rule from the reason string
+        reason_lower = result.reason.lower()
+        if "invalid internal source" in reason_lower:
+            rule = NETWORK_INVALID_INTERNAL
+        elif "not found in subnets" in reason_lower:
+            rule = NETWORK_UNKNOWN_DEST
+        elif "no route exists" in reason_lower:
+            rule = NETWORK_NO_ROUTE
+        else:
+            rule = NETWORK_SG_INGRESS
+
+        trace = build_trace(rule, "BLOCKED")
+        return InfraDiagnosticResult.blocked(
+            agent_message="Network reachability blocked",
+            developer_fields={
+                "constraint_id": "network_guard.verify_reachability",
+                "reachable": result.reachable,
+                "path": result.path,
+                "reason": result.reason,
+                "audit_trace": trace,
+            },
+        )

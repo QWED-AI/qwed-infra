@@ -1,7 +1,17 @@
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel
 
+from qwed_infra.audit import (
+    COST_BUDGET_EXCEEDED,
+    COST_UNKNOWN_RESOURCE,
+    COST_WITHIN_BUDGET,
+    build_trace,
+)
+from qwed_infra.diagnostics import InfraDiagnosticResult
+
 class CostEstimate(BaseModel):
+    model_config = {"extra": "forbid"}
     total_monthly_cost: float
     currency: str = "USD"
     breakdown: Dict[str, float]
@@ -95,4 +105,52 @@ class CostGuard:
             within_budget=within_budget,
             budget=budget_monthly,
             reason=reason
+        )
+
+    @staticmethod
+    def to_diagnostic(result: CostEstimate) -> InfraDiagnosticResult:
+        """Convert a CostEstimate to an InfraDiagnosticResult."""
+        has_unknown = "unknown instance types" in result.reason
+
+        if has_unknown:
+            trace = build_trace(COST_UNKNOWN_RESOURCE, "INCOMPLETE")
+            return InfraDiagnosticResult.blocked(
+                agent_message="Cost estimate incomplete — unknown resource types",
+                developer_fields={
+                    "constraint_id": "cost_guard.verify_budget",
+                    "within_budget": result.within_budget,
+                    "total_monthly_cost": result.total_monthly_cost,
+                    "budget": result.budget,
+                    "reason": result.reason,
+                    "audit_trace": trace,
+                },
+            )
+
+        if not result.within_budget:
+            trace = build_trace(COST_BUDGET_EXCEEDED, "EXCEEDED")
+            return InfraDiagnosticResult.verified(
+                agent_message="Cost budget verification completed",
+                developer_fields={
+                    "constraint_id": "cost_guard.verify_budget",
+                    "within_budget": result.within_budget,
+                    "total_monthly_cost": result.total_monthly_cost,
+                    "budget": result.budget,
+                    "reason": result.reason,
+                    "audit_trace": trace,
+                },
+                evidence={**trace, "total_monthly_cost": result.total_monthly_cost, "budget": result.budget},
+            )
+
+        trace = build_trace(COST_WITHIN_BUDGET, "ALLOWED")
+        return InfraDiagnosticResult.verified(
+            agent_message="Cost estimate within budget",
+            developer_fields={
+                "constraint_id": "cost_guard.verify_budget",
+                "within_budget": result.within_budget,
+                "total_monthly_cost": result.total_monthly_cost,
+                "budget": result.budget,
+                "reason": result.reason,
+                "audit_trace": trace,
+            },
+            evidence={**trace, "total_monthly_cost": result.total_monthly_cost, "budget": result.budget},
         )
