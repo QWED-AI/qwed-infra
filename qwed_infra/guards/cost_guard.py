@@ -116,7 +116,7 @@ class CostGuard:
 
         if not result.within_budget:
             trace = build_trace(COST_BUDGET_EXCEEDED, "EXCEEDED")
-            return InfraDiagnosticResult.verified(
+            return InfraDiagnosticResult.blocked(
                 agent_message="Cost estimate exceeds budget",
                 developer_fields={
                     "constraint_id": _COST_CONSTRAINT_ID,
@@ -126,7 +126,6 @@ class CostGuard:
                     "reason": result.reason,
                     "audit_trace": trace,
                 },
-                evidence={**trace, "total_monthly_cost": result.total_monthly_cost, "budget": result.budget},
             )
 
         trace = build_trace(COST_WITHIN_BUDGET, "ALLOWED")

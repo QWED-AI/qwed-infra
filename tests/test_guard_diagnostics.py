@@ -126,8 +126,10 @@ class TestCostGuardToDiagnostic:
             reason="Estimated cost $200.00 EXCEEDS budget $100.00",
         )
         diagnostic = CostGuard.to_diagnostic(result)
-        assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
-        assert diagnostic.is_verified is True
+        assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
+        assert diagnostic.is_verified is False
+        assert diagnostic.is_fail_closed is True
+        assert diagnostic.proof_ref is None
         assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "COST_BUDGET_EXCEEDED"
 
     def test_unknown_instance_type(self):

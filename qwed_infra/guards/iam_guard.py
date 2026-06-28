@@ -326,8 +326,9 @@ class IamGuard:
             "audit_trace": trace,
         }
 
+        agent_msg = "IAM policy access: allowed" if result.allowed else "IAM policy access: denied"
         return InfraDiagnosticResult.verified(
-            agent_message="IAM policy access check completed",
+            agent_message=agent_msg,
             developer_fields={
                 "constraint_id": _IAM_CONSTRAINT_ID,
                 "allowed": result.allowed,
