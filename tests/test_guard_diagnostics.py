@@ -148,6 +148,28 @@ class TestCostGuardToDiagnostic:
         assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "COST_UNKNOWN_RESOURCE"
         assert diagnostic.developer_fields["has_unknown_types"] is True
 
+    def test_verify_budget_marks_unknown_types_blocked(self):
+        estimate = CostGuard().verify_budget(
+            {"instances": [{"id": "gpu-1", "instance_type": "g6.xlarge", "count": 1}]},
+            budget_monthly=100.0,
+        )
+        assert estimate.has_unknown_types is True
+        diagnostic = CostGuard.to_diagnostic(estimate)
+        assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
+        assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "COST_UNKNOWN_RESOURCE"
+
+    def test_mismatched_within_budget_blocked(self):
+        result = CostEstimate(
+            total_monthly_cost=200.0,
+            breakdown={"web": 200.0},
+            within_budget=True,
+            budget=100.0,
+            reason="Cost exceeds budget but claims within_budget",
+        )
+        diagnostic = CostGuard.to_diagnostic(result)
+        assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
+        assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INCONSISTENT"
+
 
 class TestPydanticExtraForbid:
     def test_iam_policy_rejects_extra(self):

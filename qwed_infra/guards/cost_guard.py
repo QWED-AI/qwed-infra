@@ -99,6 +99,31 @@ class CostGuard:
 
     @staticmethod
     def to_diagnostic(result: CostEstimate) -> InfraDiagnosticResult:
+        expected_within_budget = (
+            result.total_monthly_cost <= result.budget
+            and not result.has_unknown_types
+        )
+        if result.within_budget != expected_within_budget:
+            trace_rule = (
+                COST_UNKNOWN_RESOURCE
+                if result.has_unknown_types
+                else COST_BUDGET_EXCEEDED
+            )
+            trace = build_trace(trace_rule, "INCONSISTENT")
+            return InfraDiagnosticResult.blocked(
+                agent_message="Cost estimate could not be verified",
+                developer_fields={
+                    "constraint_id": _COST_CONSTRAINT_ID,
+                    "within_budget": result.within_budget,
+                    "expected_within_budget": expected_within_budget,
+                    "total_monthly_cost": result.total_monthly_cost,
+                    "budget": result.budget,
+                    "reason": result.reason,
+                    "has_unknown_types": result.has_unknown_types,
+                    "audit_trace": trace,
+                },
+            )
+
         if result.has_unknown_types:
             trace = build_trace(COST_UNKNOWN_RESOURCE, "INCOMPLETE")
             return InfraDiagnosticResult.blocked(
