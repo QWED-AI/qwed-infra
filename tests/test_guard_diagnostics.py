@@ -30,8 +30,9 @@ class TestIamGuardToDiagnostic:
             error="Something went wrong",
         )
         diagnostic = IamGuard.to_diagnostic(result)
-        assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
+        assert diagnostic.status is InfraDiagnosticStatus.UNVERIFIABLE
         assert diagnostic.is_verified is False
+        assert diagnostic.is_fail_closed is True
         assert diagnostic.proof_ref is None
         assert "error" in diagnostic.developer_fields
 
@@ -61,6 +62,7 @@ class TestNetworkGuardToDiagnostic:
             reachable=False,
             path=["internet", "subnet-a"],
             reason="Routing exists but Security Group blocks port 80",
+            failure_code="sg_ingress_blocked",
         )
         diagnostic = NetworkGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.BLOCKED

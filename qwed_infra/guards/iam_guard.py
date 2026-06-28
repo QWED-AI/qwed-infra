@@ -301,8 +301,8 @@ class IamGuard:
     ) -> InfraDiagnosticResult:
         """Convert a VerificationResult to an InfraDiagnosticResult."""
         if not result.verified:
-            trace = audit_trace if audit_trace is not None else build_trace(IAM_DENY_PRECEDENCE, "BLOCKED")
-            return InfraDiagnosticResult.blocked(
+            trace = audit_trace if audit_trace is not None else build_trace(IAM_DENY_PRECEDENCE, "UNVERIFIABLE")
+            return InfraDiagnosticResult.unverifiable(
                 agent_message="IAM policy verification could not be completed",
                 developer_fields={
                     "constraint_id": _IAM_CONSTRAINT_ID,

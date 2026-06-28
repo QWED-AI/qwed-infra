@@ -184,7 +184,11 @@ class NetworkGuard:
             "unknown_destination": NETWORK_UNKNOWN_DEST,
             "sg_ingress_blocked": NETWORK_SG_INGRESS,
         }
-        rule = rule_map.get(result.failure_code, NETWORK_SG_INGRESS)
+        if not result.failure_code or result.failure_code not in rule_map:
+            raise ValueError(
+                f"ComputedPath missing or invalid failure_code: {result.failure_code!r}"
+            )
+        rule = rule_map[result.failure_code]
         trace = build_trace(rule, "BLOCKED")
         return InfraDiagnosticResult.blocked(
             agent_message="Network reachability blocked",
