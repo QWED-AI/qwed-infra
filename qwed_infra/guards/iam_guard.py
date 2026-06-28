@@ -10,13 +10,23 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from z3 import And, InRe, Not, Or, Solver, String, StringVal, sat
 
+from qwed_infra.audit import (
+    IAM_DENY_PRECEDENCE,
+    build_trace,
+)
+from qwed_infra.diagnostics import InfraDiagnosticResult
+
+_IAM_CONSTRAINT_ID = "iam_guard.verify_access"
+
 
 class IamPolicy(BaseModel):
+    model_config = {"extra": "forbid"}
     Version: str
     Statement: List[Dict[str, Any]]
 
 
 class VerificationResult(BaseModel):
+    model_config = {"extra": "forbid"}
     verified: bool
     allowed: bool
     proof: Optional[str] = None
@@ -282,6 +292,50 @@ class IamGuard:
                 "aws:SourceIp": "0.0.0.0",
                 "aws:CurrentTime": "2100-01-01T00:00:00Z",
             },
+        )
+
+    @staticmethod
+    def to_diagnostic(
+        result: VerificationResult,
+        audit_trace: Optional[Dict[str, Any]] = None,
+    ) -> InfraDiagnosticResult:
+        """Convert a VerificationResult to an InfraDiagnosticResult."""
+        if not result.verified:
+            trace = audit_trace if audit_trace is not None else build_trace(IAM_DENY_PRECEDENCE, "UNVERIFIABLE")
+            return InfraDiagnosticResult.unverifiable(
+                agent_message="IAM policy verification could not be completed",
+                developer_fields={
+                    "constraint_id": _IAM_CONSTRAINT_ID,
+                    "error": result.error,
+                    "audit_trace": trace,
+                },
+            )
+
+        rule = IAM_DENY_PRECEDENCE
+        if result.allowed:
+            outcome = "ALLOWED"
+        else:
+            outcome = "DENIED"
+
+        trace = audit_trace if audit_trace is not None else build_trace(rule, outcome)
+
+        evidence = {
+            "verified": result.verified,
+            "allowed": result.allowed,
+            "proof": result.proof,
+            "audit_trace": trace,
+        }
+
+        agent_msg = "IAM policy access: allowed" if result.allowed else "IAM policy access: denied"
+        return InfraDiagnosticResult.verified(
+            agent_message=agent_msg,
+            developer_fields={
+                "constraint_id": _IAM_CONSTRAINT_ID,
+                "allowed": result.allowed,
+                "proof": result.proof,
+                "audit_trace": trace,
+            },
+            evidence=evidence,
         )
 
 

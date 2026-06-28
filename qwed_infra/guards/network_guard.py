@@ -3,20 +3,37 @@ import ipaddress
 import networkx as nx
 from pydantic import BaseModel
 
+from qwed_infra.audit import (
+    NETWORK_INVALID_INTERNAL,
+    NETWORK_NO_ROUTE,
+    NETWORK_REACHABILITY,
+    NETWORK_SG_INGRESS,
+    NETWORK_UNKNOWN_DEST,
+    build_trace,
+)
+from qwed_infra.diagnostics import InfraDiagnosticResult
+
+_NETWORK_CONSTRAINT_ID = "network_guard.verify_reachability"
+
 class NetworkNode(BaseModel):
+    model_config = {"extra": "forbid"}
     id: str
     type: str # 'subnet', 'internet', 'instance'
     security_groups: List[str] = []
 
 class Route(BaseModel):
+    model_config = {"extra": "forbid"}
     source: str
     destination: str
     target: str # e.g. 'igw', 'nat'
 
 class ComputedPath(BaseModel):
+    model_config = {"extra": "forbid"}
     reachable: bool
     path: List[str]
     reason: str
+    port: int = 0
+    failure_code: str = ""
 
 class NetworkGuard:
     """
@@ -78,21 +95,21 @@ class NetworkGuard:
             try:
                 path = nx.shortest_path(self.graph, source, destination)
             except (nx.NetworkXNoPath, nx.NodeNotFound):
-                return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes")
+                return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes", port=port, failure_code="no_route")
         else:
-            # Internal source — verify source is a valid IP address
+            # Internal source — verify source is a valid private IP address
             try:
-                ipaddress.ip_address(source)
+                addr = ipaddress.ip_address(source)
             except ValueError:
-                return ComputedPath(reachable=False, path=[], reason=f"Invalid internal source: '{source}'")
-            # Verify destination subnet exists in infra
+                return ComputedPath(reachable=False, path=[], reason=f"Invalid internal source: '{source}'", port=port, failure_code="invalid_internal_source")
+            if not addr.is_private:
+                return ComputedPath(reachable=False, path=[], reason=f"Internal source '{source}' is not a private IP", port=port, failure_code="invalid_internal_source")
             dest_exists = any(s["id"] == destination for s in resources.get("subnets", []))
             if not dest_exists:
-                return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets")
+                return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets", port=port, failure_code="unknown_destination")
             path = [source, destination]
             
         # 3. Check Security Groups (Firewall Logic)
-        # simplified: check destination ingress
         target_sgs = []
         
         # Find dest subnet definition
@@ -116,8 +133,6 @@ class NetworkGuard:
                 if not port_match:
                     continue
 
-                # CIDR check for ALL sources (internet and internal)
-                # Previously internal traffic skipped CIDR — false negative (#14)
                 if rule_cidr is None:
                     continue
 
@@ -129,7 +144,6 @@ class NetworkGuard:
                         addr = ipaddress.ip_address(source)
                         cidr_match = addr in network
                 except (ValueError, TypeError):
-                    # If CIDR or IP is unparseable, fail-closed
                     cidr_match = False
 
                 if cidr_match:
@@ -138,11 +152,53 @@ class NetworkGuard:
             if ingress_allowed:
                 break
 
-        # If no security groups attached, deny by default (fail-secure)
         if not target_sgs:
             ingress_allowed = False
             
         if not ingress_allowed:
-             return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}")
+             return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}", port=port, failure_code="sg_ingress_blocked")
 
-        return ComputedPath(reachable=True, path=path, reason="Route exists and Security Groups allow traffic")
+        return ComputedPath(reachable=True, path=path, reason="Route exists and Security Groups allow traffic", port=port)
+
+    @staticmethod
+    def to_diagnostic(result: ComputedPath) -> InfraDiagnosticResult:
+        """Convert a ComputedPath to an InfraDiagnosticResult."""
+        if result.reachable:
+            trace = build_trace(NETWORK_REACHABILITY, "ALLOWED")
+            return InfraDiagnosticResult.verified(
+                agent_message="Network reachability verified",
+                developer_fields={
+                    "constraint_id": _NETWORK_CONSTRAINT_ID,
+                    "reachable": result.reachable,
+                    "path": result.path,
+                    "port": result.port,
+                    "reason": result.reason,
+                    "audit_trace": trace,
+                },
+                evidence={**trace, "path": result.path, "port": result.port, "reason": result.reason},
+            )
+
+        rule_map = {
+            "no_route": NETWORK_NO_ROUTE,
+            "invalid_internal_source": NETWORK_INVALID_INTERNAL,
+            "unknown_destination": NETWORK_UNKNOWN_DEST,
+            "sg_ingress_blocked": NETWORK_SG_INGRESS,
+        }
+        if not result.failure_code or result.failure_code not in rule_map:
+            raise ValueError(
+                f"ComputedPath missing or invalid failure_code: {result.failure_code!r}"
+            )
+        rule = rule_map[result.failure_code]
+        trace = build_trace(rule, "BLOCKED")
+        return InfraDiagnosticResult.blocked(
+            agent_message="Network reachability blocked",
+            developer_fields={
+                "constraint_id": _NETWORK_CONSTRAINT_ID,
+                "reachable": result.reachable,
+                "path": result.path,
+                "port": result.port,
+                "reason": result.reason,
+                "failure_code": result.failure_code,
+                "audit_trace": trace,
+            },
+        )
