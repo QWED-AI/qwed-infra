@@ -13,6 +13,8 @@ from qwed_infra.audit import (
 )
 from qwed_infra.diagnostics import InfraDiagnosticResult
 
+_NETWORK_CONSTRAINT_ID = "network_guard.verify_reachability"
+
 class NetworkNode(BaseModel):
     model_config = {"extra": "forbid"}
     id: str
@@ -30,6 +32,8 @@ class ComputedPath(BaseModel):
     reachable: bool
     path: List[str]
     reason: str
+    port: int = 0
+    failure_code: str = ""
 
 class NetworkGuard:
     """
@@ -91,21 +95,20 @@ class NetworkGuard:
             try:
                 path = nx.shortest_path(self.graph, source, destination)
             except (nx.NetworkXNoPath, nx.NodeNotFound):
-                return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes")
+                return ComputedPath(reachable=False, path=[], reason="No Route exists between nodes", port=port, failure_code="no_route")
         else:
             # Internal source — verify source is a valid IP address
             try:
                 ipaddress.ip_address(source)
             except ValueError:
-                return ComputedPath(reachable=False, path=[], reason=f"Invalid internal source: '{source}'")
+                return ComputedPath(reachable=False, path=[], reason=f"Invalid internal source: '{source}'", port=port, failure_code="invalid_internal_source")
             # Verify destination subnet exists in infra
             dest_exists = any(s["id"] == destination for s in resources.get("subnets", []))
             if not dest_exists:
-                return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets")
+                return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets", port=port, failure_code="unknown_destination")
             path = [source, destination]
             
         # 3. Check Security Groups (Firewall Logic)
-        # simplified: check destination ingress
         target_sgs = []
         
         # Find dest subnet definition
@@ -129,8 +132,6 @@ class NetworkGuard:
                 if not port_match:
                     continue
 
-                # CIDR check for ALL sources (internet and internal)
-                # Previously internal traffic skipped CIDR — false negative (#14)
                 if rule_cidr is None:
                     continue
 
@@ -142,7 +143,6 @@ class NetworkGuard:
                         addr = ipaddress.ip_address(source)
                         cidr_match = addr in network
                 except (ValueError, TypeError):
-                    # If CIDR or IP is unparseable, fail-closed
                     cidr_match = False
 
                 if cidr_match:
@@ -151,14 +151,13 @@ class NetworkGuard:
             if ingress_allowed:
                 break
 
-        # If no security groups attached, deny by default (fail-secure)
         if not target_sgs:
             ingress_allowed = False
             
         if not ingress_allowed:
-             return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}")
+             return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}", port=port, failure_code="sg_ingress_blocked")
 
-        return ComputedPath(reachable=True, path=path, reason="Route exists and Security Groups allow traffic")
+        return ComputedPath(reachable=True, path=path, reason="Route exists and Security Groups allow traffic", port=port)
 
     @staticmethod
     def to_diagnostic(result: ComputedPath) -> InfraDiagnosticResult:
@@ -168,34 +167,33 @@ class NetworkGuard:
             return InfraDiagnosticResult.verified(
                 agent_message="Network reachability verified",
                 developer_fields={
-                    "constraint_id": "network_guard.verify_reachability",
+                    "constraint_id": _NETWORK_CONSTRAINT_ID,
                     "reachable": result.reachable,
                     "path": result.path,
+                    "port": result.port,
                     "reason": result.reason,
                     "audit_trace": trace,
                 },
-                evidence={**trace, "path": result.path, "reason": result.reason},
+                evidence={**trace, "path": result.path, "port": result.port, "reason": result.reason},
             )
 
-        # Determine the rule from the reason string
-        reason_lower = result.reason.lower()
-        if "invalid internal source" in reason_lower:
-            rule = NETWORK_INVALID_INTERNAL
-        elif "not found in subnets" in reason_lower:
-            rule = NETWORK_UNKNOWN_DEST
-        elif "no route exists" in reason_lower:
-            rule = NETWORK_NO_ROUTE
-        else:
-            rule = NETWORK_SG_INGRESS
-
+        rule_map = {
+            "no_route": NETWORK_NO_ROUTE,
+            "invalid_internal_source": NETWORK_INVALID_INTERNAL,
+            "unknown_destination": NETWORK_UNKNOWN_DEST,
+            "sg_ingress_blocked": NETWORK_SG_INGRESS,
+        }
+        rule = rule_map.get(result.failure_code, NETWORK_SG_INGRESS)
         trace = build_trace(rule, "BLOCKED")
         return InfraDiagnosticResult.blocked(
             agent_message="Network reachability blocked",
             developer_fields={
-                "constraint_id": "network_guard.verify_reachability",
+                "constraint_id": _NETWORK_CONSTRAINT_ID,
                 "reachable": result.reachable,
                 "path": result.path,
+                "port": result.port,
                 "reason": result.reason,
+                "failure_code": result.failure_code,
                 "audit_trace": trace,
             },
         )

@@ -109,7 +109,7 @@ def build_trace(
 def trace_proof_ref(trace: Dict[str, Any]) -> str:
     """Compute a deterministic SHA-256 proof reference from an audit trace."""
     try:
-        payload = json.dumps(trace, sort_keys=True)
+        payload = json.dumps(trace, sort_keys=True, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Audit trace must be JSON-serializable for proof_ref hashing: {exc}"

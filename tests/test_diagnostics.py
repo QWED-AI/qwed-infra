@@ -18,7 +18,7 @@ class TestInfraDiagnosticResultConstruction:
     def test_minimal_verified(self):
         result = InfraDiagnosticResult.verified(
             agent_message="All checks passed",
-            developer_fields={"constraint_id": "test"},
+            developer_fields={"constraint_id": "test", "audit_trace": {"rule_id": "test_rule"}},
             evidence={"rule": "test_rule"},
         )
         assert result.status is InfraDiagnosticStatus.VERIFIED
@@ -125,7 +125,7 @@ class TestInfraDiagnosticResultSerialization:
     def test_to_dict_verified(self):
         r = InfraDiagnosticResult.verified(
             agent_message="OK",
-            developer_fields={"constraint_id": "t1"},
+            developer_fields={"constraint_id": "t1", "audit_trace": {"rule_id": "test"}},
             evidence={"key": "val"},
         )
         d = r.to_dict()
@@ -147,7 +147,7 @@ class TestInfraDiagnosticResultSerialization:
     def test_from_dict_roundtrip(self):
         original = InfraDiagnosticResult.verified(
             agent_message="Roundtrip test",
-            developer_fields={"constraint_id": "t1"},
+            developer_fields={"constraint_id": "t1", "audit_trace": {"rule_id": "test"}},
             evidence={"key": "val"},
         )
         d = original.to_dict()

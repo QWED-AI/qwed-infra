@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from pydantic import BaseModel
 
@@ -10,6 +10,9 @@ from qwed_infra.audit import (
 )
 from qwed_infra.diagnostics import InfraDiagnosticResult
 
+_COST_CONSTRAINT_ID = "cost_guard.verify_budget"
+
+
 class CostEstimate(BaseModel):
     model_config = {"extra": "forbid"}
     total_monthly_cost: float
@@ -18,6 +21,8 @@ class CostEstimate(BaseModel):
     within_budget: bool
     budget: float
     reason: str
+    has_unknown_types: bool = False
+
 
 class CostGuard:
     """
@@ -26,37 +31,26 @@ class CostGuard:
     """
     
     # Simplified Static Pricing Catalog (USD per hour)
-    # In production, this would fetch from AWS Price List API / Azure Retail Prices API
     PRICING_CATALOG = {
-        # Compute (AWS estimates)
         "t3.micro": 0.0104,
         "t3.small": 0.0208,
         "t3.medium": 0.0416,
         "m5.large": 0.096,
         "c5.large": 0.085,
-        "g4dn.xlarge": 0.526,   # GPU
-        "p4d.24xlarge": 32.77,  # Big GPU (The budget killer)
-        
-        # Database (RDS estimates)
+        "g4dn.xlarge": 0.526,
+        "p4d.24xlarge": 32.77,
         "db.t3.micro": 0.017,
         "db.m5.large": 0.142,
-        
-        # Storage (per GB per month, normalized to hourly for simplicity ~ 0.023 / 730)
-        "gp2-storage-gb": 0.0000315, 
+        "gp2-storage-gb": 0.0000315,
     }
     
     HOURS_PER_MONTH = 730
     
     def verify_budget(self, resources: Dict[str, Any], budget_monthly: float) -> CostEstimate:
-        """
-        Calculates total estimated monthly cost of the infrastructure and validates against budget.
-        """
         total_hourly_cost = 0.0
         breakdown = {}
         unknown_instance_types = []
 
-        # 1. Calculate Estimations
-        # Instances
         instances = resources.get("instances", [])
         for inst in instances:
             inst_type = inst.get("instance_type", "t3.micro")
@@ -71,9 +65,6 @@ class CostGuard:
             total_hourly_cost += cost
             breakdown[inst['id']] = cost * self.HOURS_PER_MONTH
 
-        # Storage
-        # Explicit volumes or implicit in instance?
-        # Let's support an explicit 'volumes' list
         volumes = resources.get("volumes", [])
         for vol in volumes:
             size_gb = vol.get("size_gb", 10)
@@ -83,12 +74,10 @@ class CostGuard:
             breakdown[f"vol-{vol.get('id', 'unknown')}"] = cost * self.HOURS_PER_MONTH
 
         total_monthly = total_hourly_cost * self.HOURS_PER_MONTH
-        
-        # 2. Check Budget
-        # Unknown instance types → fail closed (budget cannot be proved)
-        within_budget = (total_monthly <= budget_monthly) and not unknown_instance_types
+        has_unknown = bool(unknown_instance_types)
+        within_budget = (total_monthly <= budget_monthly) and not has_unknown
 
-        if unknown_instance_types:
+        if has_unknown:
             reason = (
                 f"Cost estimate incomplete — unknown instance types: "
                 f"{sorted(set(unknown_instance_types))}. "
@@ -98,30 +87,29 @@ class CostGuard:
             reason = f"Estimated cost ${total_monthly:.2f} is within budget ${budget_monthly:.2f}"
         else:
             reason = f"Estimated cost ${total_monthly:.2f} EXCEEDS budget ${budget_monthly:.2f}"
-            
+
         return CostEstimate(
             total_monthly_cost=total_monthly,
             breakdown=breakdown,
             within_budget=within_budget,
             budget=budget_monthly,
-            reason=reason
+            reason=reason,
+            has_unknown_types=has_unknown,
         )
 
     @staticmethod
     def to_diagnostic(result: CostEstimate) -> InfraDiagnosticResult:
-        """Convert a CostEstimate to an InfraDiagnosticResult."""
-        has_unknown = "unknown instance types" in result.reason
-
-        if has_unknown:
+        if result.has_unknown_types:
             trace = build_trace(COST_UNKNOWN_RESOURCE, "INCOMPLETE")
             return InfraDiagnosticResult.blocked(
                 agent_message="Cost estimate incomplete — unknown resource types",
                 developer_fields={
-                    "constraint_id": "cost_guard.verify_budget",
+                    "constraint_id": _COST_CONSTRAINT_ID,
                     "within_budget": result.within_budget,
                     "total_monthly_cost": result.total_monthly_cost,
                     "budget": result.budget,
                     "reason": result.reason,
+                    "has_unknown_types": result.has_unknown_types,
                     "audit_trace": trace,
                 },
             )
@@ -129,9 +117,9 @@ class CostGuard:
         if not result.within_budget:
             trace = build_trace(COST_BUDGET_EXCEEDED, "EXCEEDED")
             return InfraDiagnosticResult.verified(
-                agent_message="Cost budget verification completed",
+                agent_message="Cost estimate exceeds budget",
                 developer_fields={
-                    "constraint_id": "cost_guard.verify_budget",
+                    "constraint_id": _COST_CONSTRAINT_ID,
                     "within_budget": result.within_budget,
                     "total_monthly_cost": result.total_monthly_cost,
                     "budget": result.budget,
@@ -145,7 +133,7 @@ class CostGuard:
         return InfraDiagnosticResult.verified(
             agent_message="Cost estimate within budget",
             developer_fields={
-                "constraint_id": "cost_guard.verify_budget",
+                "constraint_id": _COST_CONSTRAINT_ID,
                 "within_budget": result.within_budget,
                 "total_monthly_cost": result.total_monthly_cost,
                 "budget": result.budget,

@@ -11,15 +11,12 @@ from pydantic import BaseModel
 from z3 import And, InRe, Not, Or, Solver, String, StringVal, sat
 
 from qwed_infra.audit import (
-    IAM_DATE_CONDITION,
     IAM_DENY_PRECEDENCE,
-    IAM_IP_CONDITION,
-    IAM_STRING_CONDITION,
-    IAM_UNKNOWN_OPERATOR,
-    IAM_WILDCARD_MATCH,
     build_trace,
 )
 from qwed_infra.diagnostics import InfraDiagnosticResult
+
+_IAM_CONSTRAINT_ID = "iam_guard.verify_access"
 
 
 class IamPolicy(BaseModel):
@@ -307,7 +304,7 @@ class IamGuard:
             return InfraDiagnosticResult.blocked(
                 agent_message="IAM policy verification could not be completed",
                 developer_fields={
-                    "constraint_id": "iam_guard.verify_access",
+                    "constraint_id": _IAM_CONSTRAINT_ID,
                     "error": result.error,
                     "audit_trace": audit_trace,
                 },
@@ -331,7 +328,7 @@ class IamGuard:
         return InfraDiagnosticResult.verified(
             agent_message="IAM policy access check completed",
             developer_fields={
-                "constraint_id": "iam_guard.verify_access",
+                "constraint_id": _IAM_CONSTRAINT_ID,
                 "allowed": result.allowed,
                 "proof": result.proof,
                 "audit_trace": trace,

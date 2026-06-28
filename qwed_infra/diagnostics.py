@@ -76,7 +76,7 @@ class InfraAdvisoryCheck:
 def compute_proof_ref(evidence: Dict[str, Any]) -> str:
     """Compute a deterministic proof reference hash from retained evidence."""
     try:
-        payload = json.dumps(evidence, sort_keys=True)
+        payload = json.dumps(evidence, sort_keys=True, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Proof evidence must be JSON-serializable for proof_ref hashing: {exc}"
@@ -113,12 +113,18 @@ class InfraDiagnosticResult:
         if not isinstance(self.developer_fields, dict):
             raise ValueError("developer_fields must be a dict")
 
-        if self.status is InfraDiagnosticStatus.VERIFIED and not self.proof_ref:
-            raise ValueError(
-                "VERIFIED status requires proof_ref is not None and non-empty — "
-                "a claim cannot be marked proven without a proof artifact hash. "
-                "Use UNVERIFIABLE if no proof was established."
-            )
+        if self.status is InfraDiagnosticStatus.VERIFIED:
+            if not self.proof_ref:
+                raise ValueError(
+                    "VERIFIED status requires proof_ref is not None and non-empty — "
+                    "a claim cannot be marked proven without a proof artifact hash. "
+                    "Use UNVERIFIABLE if no proof was established."
+                )
+            if "audit_trace" not in self.developer_fields:
+                raise ValueError(
+                    "VERIFIED status requires 'audit_trace' in developer_fields — "
+                    "a proved claim must reference its audit trace."
+                )
 
         if self.status is not InfraDiagnosticStatus.VERIFIED and self.proof_ref is not None:
             raise ValueError(
@@ -180,20 +186,22 @@ class InfraDiagnosticResult:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InfraDiagnosticResult":
-        status = data.get("status", "UNVERIFIABLE")
-        if isinstance(status, str):
+        raw_status = data.get("status")
+        if raw_status is None:
+            raise ValueError("from_dict: 'status' is required — no default.")
+        if isinstance(raw_status, str):
             try:
-                status = InfraDiagnosticStatus(status)
+                status = InfraDiagnosticStatus(raw_status)
             except ValueError:
                 valid = ", ".join(s.value for s in InfraDiagnosticStatus)
                 raise ValueError(
-                    f"from_dict: invalid status {status!r} — "
+                    f"from_dict: invalid status {raw_status!r} — "
                     f"must be one of: {valid}."
                 ) from None
-        elif not isinstance(status, InfraDiagnosticStatus):
+        elif not isinstance(raw_status, InfraDiagnosticStatus):
             valid = ", ".join(s.value for s in InfraDiagnosticStatus)
             raise ValueError(
-                f"from_dict: invalid status type {type(status).__name__} — "
+                f"from_dict: invalid status type {type(raw_status).__name__} — "
                 f"must be one of: {valid}."
             )
 

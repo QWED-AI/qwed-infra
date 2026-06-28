@@ -1,3 +1,4 @@
+import pydantic
 import pytest
 from qwed_infra.diagnostics import InfraDiagnosticStatus
 from qwed_infra.guards.iam_guard import IamGuard, VerificationResult
@@ -71,16 +72,19 @@ class TestNetworkGuardToDiagnostic:
             reachable=False,
             path=[],
             reason="No Route exists between nodes",
+            failure_code="no_route",
         )
         diagnostic = NetworkGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
         assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "NETWORK_NO_ROUTE"
+        assert diagnostic.developer_fields["failure_code"] == "no_route"
 
     def test_invalid_internal_source(self):
         result = ComputedPath(
             reachable=False,
             path=[],
             reason="Invalid internal source: 'not-an-ip'",
+            failure_code="invalid_internal_source",
         )
         diagnostic = NetworkGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
@@ -91,6 +95,7 @@ class TestNetworkGuardToDiagnostic:
             reachable=False,
             path=[],
             reason="Destination 'subnet-ghost' not found in subnets",
+            failure_code="unknown_destination",
         )
         diagnostic = NetworkGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
@@ -132,37 +137,39 @@ class TestCostGuardToDiagnostic:
             within_budget=False,
             budget=100.0,
             reason="Cost estimate incomplete \u2014 unknown instance types: ['g6.xlarge']. Known cost $50.00 vs budget $100.00.",
+            has_unknown_types=True,
         )
         diagnostic = CostGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
         assert diagnostic.is_verified is False
         assert diagnostic.proof_ref is None
         assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "COST_UNKNOWN_RESOURCE"
+        assert diagnostic.developer_fields["has_unknown_types"] is True
 
 
 class TestPydanticExtraForbid:
     def test_iam_policy_rejects_extra(self):
         from qwed_infra.guards.iam_guard import IamPolicy
 
-        with pytest.raises(Exception):
+        with pytest.raises(pydantic.ValidationError):
             IamPolicy(Version="2012-10-17", Statement=[], extra_field="bad")
 
     def test_verification_result_rejects_extra(self):
         from qwed_infra.guards.iam_guard import VerificationResult
 
-        with pytest.raises(Exception):
+        with pytest.raises(pydantic.ValidationError):
             VerificationResult(verified=True, allowed=True, extra="bad")
 
     def test_computed_path_rejects_extra(self):
         from qwed_infra.guards.network_guard import ComputedPath
 
-        with pytest.raises(Exception):
+        with pytest.raises(pydantic.ValidationError):
             ComputedPath(reachable=True, path=[], reason="ok", extra="bad")
 
     def test_cost_estimate_rejects_extra(self):
         from qwed_infra.guards.cost_guard import CostEstimate
 
-        with pytest.raises(Exception):
+        with pytest.raises(pydantic.ValidationError):
             CostEstimate(
                 total_monthly_cost=0,
                 breakdown={},
