@@ -177,7 +177,7 @@ class NetworkGuard:
                     to_port = self._normalize_port(rule_to)
                     if from_port is None or to_port is None:
                         port_match = False
-                    elif from_port == -1 and to_port == -1:
+                    elif from_port == -1 or to_port == -1:
                         port_match = True
                     else:
                         port_match = from_port <= to_port and from_port <= port <= to_port
