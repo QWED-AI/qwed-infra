@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import ipaddress
 import networkx as nx
 from pydantic import BaseModel
@@ -42,26 +42,46 @@ class NetworkGuard:
     be used for authorization decisions.
     """
 
+    _UNSUPPORTED_TOPOLOGY_KEYS = (
+        "nacls",
+        "vpc_peering",
+        "vpc_peerings",
+        "vpc_peering_connections",
+        "nat_gateway",
+        "nat_gateways",
+        "transit_gateway",
+        "transit_gateways",
+        "transit_gateway_attachments",
+    )
+
     def __init__(self):
         self.graph = nx.DiGraph()
         self.has_unsupported_topology = False
 
+    def _normalize_port(self, value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _check_unsupported_topology(self, resources: Dict[str, Any]) -> None:
         """Scan resources for unsupported topology constructs and set flag."""
-        if resources.get("nacls"):
-            self.has_unsupported_topology = True
-            return
-
-        if resources.get("vpc_peering"):
-            self.has_unsupported_topology = True
-            return
+        for key in self._UNSUPPORTED_TOPOLOGY_KEYS:
+            if resources.get(key):
+                self.has_unsupported_topology = True
+                return
 
         route_tables = resources.get("route_tables", [])
         for rt in route_tables:
             routes = rt.get("routes", {})
             for _dest, target in routes.items():
+                if not isinstance(target, str):
+                    self.has_unsupported_topology = True
+                    return
                 t = target.lower()
-                if any(kw in t for kw in ("nat", "ngw", "tgw", "pcx")):
+                if any(t.startswith(prefix) for prefix in ("nat-", "ngw-", "tgw-", "pcx-")):
                     self.has_unsupported_topology = True
                     return
 
@@ -70,6 +90,8 @@ class NetworkGuard:
         self.graph.clear()
         self.has_unsupported_topology = False
         self._check_unsupported_topology(resources)
+        if self.has_unsupported_topology:
+            return
 
         subnets = resources.get("subnets", [])
         for subnet in subnets:
@@ -122,7 +144,11 @@ class NetworkGuard:
             dest_exists = any(s["id"] == destination for s in resources.get("subnets", []))
             if not dest_exists:
                 return ComputedPath(reachable=False, path=[], reason=f"Destination '{destination}' not found in subnets", port=port, failure_code="unknown_destination")
-            path = [source, destination]
+            return ComputedPath(
+                reachable=False, path=[], port=port, failure_code="unsupported_topology",
+                reason="Internal source reachability is not graph-modeled — cannot verify",
+                unsupported_topology=True,
+            )
 
         target_sgs = []
 
@@ -144,9 +170,17 @@ class NetworkGuard:
                 rule_cidr = rule.get("cidr")
 
                 if rule_port is not None:
-                    port_match = (rule_port == port) or (rule_port == -1)
+                    normalized_port = self._normalize_port(rule_port)
+                    port_match = normalized_port in (port, -1)
                 elif rule_from is not None and rule_to is not None:
-                    port_match = (rule_from <= port <= rule_to) or (rule_from == -1)
+                    from_port = self._normalize_port(rule_from)
+                    to_port = self._normalize_port(rule_to)
+                    if from_port is None or to_port is None:
+                        port_match = False
+                    elif from_port == -1 and to_port == -1:
+                        port_match = True
+                    else:
+                        port_match = from_port <= to_port and from_port <= port <= to_port
                 else:
                     port_match = False
 
