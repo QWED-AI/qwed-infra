@@ -257,17 +257,19 @@ class IamGuard:
             query = And(s_action == StringVal(action), s_resource == StringVal(resource))
 
             # Collect condition metadata for audit trace
+            _Z3_OPS = {"StringEquals", "StringLike"}
             condition_evaluations = []
             for stmt in policy.get("Statement", []):
                 conditions = stmt.get("Condition", {})
                 for operator, restrictions in conditions.items():
+                    evaluated_in = "z3" if operator in _Z3_OPS else "python"
                     for key, required_val in restrictions.items():
                         condition_evaluations.append({
                             "operator": operator,
                             "key": key,
-                            "context_value": context.get(key),
-                            "required_value": required_val,
-                            "evaluated_in": "python",
+                            "context_value": str(context.get(key)),
+                            "required_value": str(required_val),
+                            "evaluated_in": evaluated_in,
                         })
 
             policy_logic = self._build_policy_logic(policy, s_action, s_resource, context)
@@ -335,7 +337,12 @@ class IamGuard:
             outcome = "DENIED"
 
         trace_inputs = {"condition_evaluations": result.condition_evaluations} if result.condition_evaluations else None
-        trace = audit_trace if audit_trace is not None else build_trace(rule, outcome, inputs=trace_inputs)
+        if audit_trace is not None:
+            trace = dict(audit_trace)
+            if trace_inputs:
+                trace["inputs"] = trace_inputs
+        else:
+            trace = build_trace(rule, outcome, inputs=trace_inputs)
 
         evidence = {
             "verified": result.verified,
