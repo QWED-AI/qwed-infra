@@ -31,6 +31,7 @@ class VerificationResult(BaseModel):
     allowed: bool
     proof: Optional[str] = None
     error: Optional[str] = None
+    condition_evaluations: List[Dict[str, Any]] = []
 
 
 class IamGuard:
@@ -255,6 +256,22 @@ class IamGuard:
             s_resource = String("resource")
             query = And(s_action == StringVal(action), s_resource == StringVal(resource))
 
+            # Collect condition metadata for audit trace
+            _Z3_OPS = {"StringEquals", "StringLike"}
+            condition_evaluations = []
+            for stmt in policy.get("Statement", []):
+                conditions = stmt.get("Condition", {})
+                for operator, restrictions in conditions.items():
+                    evaluated_in = "z3" if operator in _Z3_OPS else "python"
+                    for key, required_val in restrictions.items():
+                        condition_evaluations.append({
+                            "operator": operator,
+                            "key": key,
+                            "context_value": str(context.get(key)),
+                            "required_value": str(required_val),
+                            "evaluated_in": evaluated_in,
+                        })
+
             policy_logic = self._build_policy_logic(policy, s_action, s_resource, context)
 
             self.solver.reset()
@@ -266,11 +283,13 @@ class IamGuard:
                     verified=True,
                     allowed=True,
                     proof="Z3 found a satisfying model (Access Allowed)",
+                    condition_evaluations=condition_evaluations,
                 )
             return VerificationResult(
                 verified=True,
                 allowed=False,
                 proof="Z3 proved unsatisfiability (Access Denied)",
+                condition_evaluations=condition_evaluations,
             )
         except Exception as exc:  # noqa: BLE001
             return VerificationResult(
@@ -317,7 +336,13 @@ class IamGuard:
         else:
             outcome = "DENIED"
 
-        trace = audit_trace if audit_trace is not None else build_trace(rule, outcome)
+        trace_inputs = {"condition_evaluations": result.condition_evaluations} if result.condition_evaluations else None
+        if audit_trace is not None:
+            trace = dict(audit_trace)
+            if trace_inputs:
+                trace["inputs"] = {**trace.get("inputs", {}), **trace_inputs}
+        else:
+            trace = build_trace(rule, outcome, inputs=trace_inputs)
 
         evidence = {
             "verified": result.verified,
@@ -325,6 +350,8 @@ class IamGuard:
             "proof": result.proof,
             "audit_trace": trace,
         }
+        if result.condition_evaluations:
+            evidence["condition_evaluations"] = result.condition_evaluations
 
         agent_msg = "IAM policy access: allowed" if result.allowed else "IAM policy access: denied"
         return InfraDiagnosticResult.verified(

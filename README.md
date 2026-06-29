@@ -29,7 +29,7 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 ## 💡 What QWED-Infra Is (and Isn't)
 
 ### ✅ QWED-Infra IS:
-*   **A Mathematical Proof Engine:** Uses **Z3 Theorem Prover** to *prove* your IAM policies are secure.
+*   **A Deterministic Verification Engine:** Uses **Z3 Theorem Prover** to *prove* IAM action/resource matching, with IP and date conditions evaluated deterministically in Python.
 *   **A Graph Analyzer:** Uses **NetworkX** to map and verify network reachability (Reachability Analysis).
 *   **Deterministic:** Inputs are code, output is `True/False` with 100% certainty.
 *   **A "Guard" Layer:** Plugs into CI/CD to block AI-generated PRs that violate rules.
@@ -49,7 +49,7 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 | **IAM Logic** | Can catch `s3:*` text match | Proves `Allow` overrides `Deny` logically |
 | **Network** | Checks generic "port 22 open" | Traces `Internet -> IGW -> Route -> SG -> VM` |
 | **Cost** | N/A (usually distinct tools) | **Deterministic Pre-Deployment Estimation** |
-| **Accuracy** | High False Positives | **Mathematically Proven Correctness** |
+| **Accuracy** | High False Positives | **Deterministic Correctness** |
 
 ---
 
@@ -57,9 +57,9 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 
 ### 1. IamGuard (The Security Math)
 Converts AWS IAM Policies into logical formulas.
-*   **Wildcards:** Handles `s3:Get*` vs `s3:GetObject`.
-*   **Logic:** Proves `Deny` statements always win.
-*   **Context:** Verifies against specific conditions (e.g., `aws:SourceIp`).
+*   **Wildcards:** Handles `s3:Get*` vs `s3:GetObject` — proved symbolically in Z3.
+*   **Logic:** Proves `Deny` statements always win — proved symbolically in Z3.
+*   **Context:** Verifies against specific conditions (e.g., `aws:SourceIp`, `aws:CurrentTime`) — evaluated deterministically in Python, with full trace in diagnostic output.
 
 ### 2. NetworkGuard (The Topology Graph)
 Builds a directed graph of your VPC.
