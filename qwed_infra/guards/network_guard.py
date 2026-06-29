@@ -218,7 +218,7 @@ class NetworkGuard:
     @staticmethod
     def to_diagnostic(result: ComputedPath) -> InfraDiagnosticResult:
         """Convert a ComputedPath to an InfraDiagnosticResult."""
-        if result.unsupported_topology:
+        if result.unsupported_topology or result.failure_code == "unsupported_topology":
             trace = build_trace(NETWORK_UNSUPPORTED_TOPOLOGY, "UNVERIFIABLE")
             return InfraDiagnosticResult.unverifiable(
                 agent_message="Network reachability cannot be verified — topology contains unsupported constructs",
