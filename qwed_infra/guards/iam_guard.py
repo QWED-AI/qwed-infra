@@ -340,7 +340,7 @@ class IamGuard:
         if audit_trace is not None:
             trace = dict(audit_trace)
             if trace_inputs:
-                trace["inputs"] = trace_inputs
+                trace["inputs"] = {**trace.get("inputs", {}), **trace_inputs}
         else:
             trace = build_trace(rule, outcome, inputs=trace_inputs)
 
