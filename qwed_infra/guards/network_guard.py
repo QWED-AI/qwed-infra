@@ -43,6 +43,7 @@ class NetworkGuard:
     """
 
     _UNSUPPORTED_TOPOLOGY_KEYS = (
+        "nacl",
         "nacls",
         "vpc_peering",
         "vpc_peerings",
