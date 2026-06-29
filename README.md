@@ -134,7 +134,7 @@ print(result.reachable)  # -> True (Risk Alert!)
 
 # Convert to structured diagnostic for CI/CD enforcement
 diagnostic = NetworkGuard.to_diagnostic(result)
-print(diagnostic.status)  # -> VERIFIED / BLOCKED / UNVERIFIABLE
+print(diagnostic.status.value)  # -> VERIFIED / BLOCKED / UNVERIFIABLE
 ```
 
 ### Enforce Budget

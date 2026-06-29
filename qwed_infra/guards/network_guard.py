@@ -252,6 +252,7 @@ class NetworkGuard:
             "invalid_internal_source": NETWORK_INVALID_INTERNAL,
             "unknown_destination": NETWORK_UNKNOWN_DEST,
             "sg_ingress_blocked": NETWORK_SG_INGRESS,
+            "unsupported_topology": NETWORK_UNSUPPORTED_TOPOLOGY,
         }
         if not result.failure_code or result.failure_code not in rule_map:
             raise ValueError(
