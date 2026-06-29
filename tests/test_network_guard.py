@@ -1,5 +1,6 @@
 import pytest
 from qwed_infra.guards.network_guard import NetworkGuard
+from qwed_infra.diagnostics import InfraDiagnosticResult
 
 @pytest.fixture
 def guard():
@@ -264,3 +265,169 @@ def test_internal_source_unknown_destination(guard, internal_infra):
     )
     assert result.reachable is False
     assert "not found in subnets" in result.reason
+
+
+#
+# Unsupported topology — fail-closed to UNVERIFIABLE
+#
+
+def test_unsupported_topology_nat_route(guard):
+    """NAT gateway in route target must produce UNVERIFIABLE."""
+    infra = {
+        "subnets": [{"id": "subnet-private", "security_groups": ["sg-app"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-private", "routes": {"0.0.0.0/0": "nat-123"}}
+        ],
+        "security_groups": {
+            "sg-app": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+        },
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-private", port=80)
+    assert result.reachable is False
+    assert result.unsupported_topology is True
+
+
+def test_unsupported_topology_nacl(guard):
+    """NACLs in resources must produce UNVERIFIABLE."""
+    infra = {
+        "subnets": [{"id": "subnet-app", "security_groups": ["sg-app"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-app", "routes": {"0.0.0.0/0": "igw-main"}}
+        ],
+        "security_groups": {
+            "sg-app": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+        },
+        "nacls": [
+            {"id": "nacl-1", "subnet_id": "subnet-app", "rules": []}
+        ],
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-app", port=80)
+    assert result.reachable is False
+    assert result.unsupported_topology is True
+
+
+def test_unsupported_topology_vpc_peering(guard):
+    """VPC Peering in resources must produce UNVERIFIABLE."""
+    infra = {
+        "subnets": [{"id": "subnet-app", "security_groups": ["sg-app"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-app", "routes": {"0.0.0.0/0": "igw-main"}}
+        ],
+        "security_groups": {
+            "sg-app": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+        },
+        "vpc_peering": {"pcx-aaa": {"status": "active"}},
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-app", port=80)
+    assert result.reachable is False
+    assert result.unsupported_topology is True
+
+
+def test_unsupported_topology_transit_gateway(guard):
+    """Transit Gateway route target must produce UNVERIFIABLE."""
+    infra = {
+        "subnets": [{"id": "subnet-app", "security_groups": ["sg-app"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-app", "routes": {"10.0.0.0/8": "tgw-123"}}
+        ],
+        "security_groups": {
+            "sg-app": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+        },
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-app", port=80)
+    assert result.reachable is False
+    assert result.unsupported_topology is True
+
+
+def test_unsupported_topology_to_diagnostic_unverifiable(guard):
+    """to_diagnostic must return UNVERIFIABLE for unsupported topology."""
+    infra = {
+        "subnets": [{"id": "subnet-app", "security_groups": ["sg-app"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-app", "routes": {"0.0.0.0/0": "nat-123"}}
+        ],
+        "security_groups": {
+            "sg-app": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+        },
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-app", port=80)
+    diagnostic = NetworkGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "UNVERIFIABLE"
+    assert diagnostic.proof_ref is None
+    assert not diagnostic.is_authoritative
+    assert diagnostic.is_fail_closed
+
+
+#
+# Port range support (from_port / to_port)
+#
+
+def test_port_range_single_port_allowed(guard, mock_infra):
+    """Single port rule (port=XX) still matches correctly."""
+    result = guard.verify_reachability(mock_infra, source="internet", destination="subnet-public", port=80)
+    assert result.reachable is True
+
+
+def test_port_range_from_to_allowed(guard):
+    """from_port/to_port range covers the checked port."""
+    infra = {
+        "subnets": [{"id": "subnet-web", "security_groups": ["sg-web"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-web", "routes": {"0.0.0.0/0": "igw-main"}}
+        ],
+        "security_groups": {
+            "sg-web": {"ingress": [{"from_port": 80, "to_port": 443, "cidr": "0.0.0.0/0"}]},
+        },
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-web", port=443)
+    assert result.reachable is True
+
+
+def test_port_range_from_to_blocked(guard):
+    """from_port/to_port range does NOT cover the checked port."""
+    infra = {
+        "subnets": [{"id": "subnet-web", "security_groups": ["sg-web"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-web", "routes": {"0.0.0.0/0": "igw-main"}}
+        ],
+        "security_groups": {
+            "sg-web": {"ingress": [{"from_port": 80, "to_port": 443, "cidr": "0.0.0.0/0"}]},
+        },
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-web", port=22)
+    assert result.reachable is False
+
+
+def test_port_range_all_ports(guard):
+    """from_port=-1 means all ports."""
+    infra = {
+        "subnets": [{"id": "subnet-web", "security_groups": ["sg-web"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-web", "routes": {"0.0.0.0/0": "igw-main"}}
+        ],
+        "security_groups": {
+            "sg-web": {"ingress": [{"from_port": -1, "to_port": -1, "cidr": "0.0.0.0/0"}]},
+        },
+    }
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-web", port=27017)
+    assert result.reachable is True
+
+
+def test_port_range_prefers_single_port(guard):
+    """Single port takes priority over from_port/to_port when both present."""
+    infra = {
+        "subnets": [{"id": "subnet-web", "security_groups": ["sg-web"]}],
+        "route_tables": [
+            {"subnet_id": "subnet-web", "routes": {"0.0.0.0/0": "igw-main"}}
+        ],
+        "security_groups": {
+            "sg-web": {
+                "ingress": [
+                    {"port": 22, "from_port": 80, "to_port": 443, "cidr": "0.0.0.0/0"}
+                ]
+            },
+        },
+    }
+    # port=22 matches via rule_port even though range would exclude it
+    result = guard.verify_reachability(infra, source="internet", destination="subnet-web", port=22)
+    assert result.reachable is True

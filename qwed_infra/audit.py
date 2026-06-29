@@ -73,6 +73,10 @@ NETWORK_UNKNOWN_DEST = RuleRef(
     "NETWORK_UNKNOWN_DEST",
     "AWS VPC (destination subnet not found)",
 )
+NETWORK_UNSUPPORTED_TOPOLOGY = RuleRef(
+    "NETWORK_UNSUPPORTED_TOPOLOGY",
+    "AWS VPC Topology (unsupported constructs — cannot verify)",
+)
 
 # Cost Guard
 COST_BUDGET_EXCEEDED = RuleRef(
@@ -133,6 +137,7 @@ __all__ = [
     "NETWORK_NO_ROUTE",
     "NETWORK_INVALID_INTERNAL",
     "NETWORK_UNKNOWN_DEST",
+    "NETWORK_UNSUPPORTED_TOPOLOGY",
     "COST_BUDGET_EXCEEDED",
     "COST_UNKNOWN_RESOURCE",
     "COST_WITHIN_BUDGET",
