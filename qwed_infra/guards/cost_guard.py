@@ -55,6 +55,13 @@ class CostGuard:
     HOURS_PER_MONTH = 730
 
     @staticmethod
+    def _unique_key(breakdown: dict, key: str) -> str:
+        if key not in breakdown:
+            return key
+        suffix = sum(1 for k in breakdown if k == key or k.startswith(f"{key}#"))
+        return f"{key}#{suffix}"
+
+    @staticmethod
     def _build_reason(
         total_monthly: float,
         budget_monthly: float,
@@ -105,7 +112,8 @@ class CostGuard:
 
             cost = price * count
             total_hourly_cost += cost
-            breakdown[inst.get('id', inst_type)] = cost * self.HOURS_PER_MONTH
+            key = self._unique_key(breakdown, inst.get('id') or inst_type)
+            breakdown[key] = cost * self.HOURS_PER_MONTH
 
         volumes = resources.get("volumes", [])
         for vol in volumes:
@@ -123,7 +131,8 @@ class CostGuard:
                 continue
             cost = size_gb * price_per_gb_hour
             total_hourly_cost += cost
-            breakdown[f"vol-{vol.get('id', 'unknown')}"] = cost * self.HOURS_PER_MONTH
+            key = self._unique_key(breakdown, f"vol-{vol.get('id', 'unknown')}")
+            breakdown[key] = cost * self.HOURS_PER_MONTH
 
         total_monthly = total_hourly_cost * self.HOURS_PER_MONTH
         has_unknown = bool(unknown_instance_types) or bool(unknown_volume_types)

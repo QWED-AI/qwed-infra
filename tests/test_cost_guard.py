@@ -151,3 +151,19 @@ def test_missing_both_id_and_type_fails_closed(guard):
     assert result.within_budget is False
     assert result.has_unknown_types is True
     assert "<missing>" in result.reason
+    assert "unknown-<missing-id>" in result.breakdown
+
+
+def test_id_less_instances_no_breakdown_collision(guard):
+    resources = {
+        "instances": [
+            {"instance_type": "t3.micro", "count": 2},
+            {"instance_type": "t3.micro", "count": 3},
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is True
+    assert "t3.micro" in result.breakdown
+    assert "t3.micro#1" in result.breakdown
+    assert result.breakdown["t3.micro"] == 2 * 0.0104 * 730
+    assert result.breakdown["t3.micro#1"] == 3 * 0.0104 * 730
