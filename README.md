@@ -47,7 +47,7 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 | :--- | :--- | :--- |
 | **Approach** | Regex / Static Pattern Matching | **Symbolic Execution (Z3) & Graph Theory** |
 | **IAM Logic** | Can catch `s3:*` text match | Proves `Allow` overrides `Deny` logically |
-| **Network** | Checks generic "port 22 open" | Traces `Internet -> IGW -> Route -> SG -> VM` |
+| **Network** | Checks generic "port 22 open" | Traces `Internet -> IGW -> Route -> SG -> Subnet` (fail-closed on NAT/NACL/peering) |
 | **Cost** | N/A (usually distinct tools) | **Deterministic Pre-Deployment Estimation** |
 | **Accuracy** | High False Positives | **Deterministic Correctness** |
 
@@ -64,7 +64,8 @@ Converts AWS IAM Policies into logical formulas.
 ### 2. NetworkGuard (The Topology Graph)
 Builds a directed graph of your VPC.
 *   **Reachability:** "Can an attacker on the Internet reach my Database?"
-*   **Path Analysis:** Traces routes through Subnets, NACLs, and Security Groups.
+*   **Path Analysis:** Traces routes through Subnets and Security Groups.
+*   **Limitations (fail-closed):** NAT Gateways, VPC Peering, NACLs, and Transit Gateway are not modeled. If any are present, the guard returns `UNVERIFIABLE` — the result carries no proof and must not be used for authorization decisions.
 
 ### 3. CostGuard (The Budget Enforcer)
 Prevents financial ruin.
@@ -113,13 +114,27 @@ from qwed_infra import NetworkGuard
 
 net = NetworkGuard()
 infra = {
-    "subnets": [{"id": "public", "routes": "igw"}],
-    "instances": [{"id": "web", "subnet": "public", "sg": "open-sg"}]
+    "subnets": [
+        {"id": "subnet-web", "security_groups": ["sg-web"]},
+    ],
+    "route_tables": [
+        {
+            "subnet_id": "subnet-web",
+            "routes": {"0.0.0.0/0": "igw-main"},
+        }
+    ],
+    "security_groups": {
+        "sg-web": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+    },
 }
 
-# Is the instance reachable from Internet?
-print(net.verify_reachability(infra, "internet", "web")) 
-# -> True (Risk Alert!)
+# Is the web subnet reachable from Internet on port 80?
+result = net.verify_reachability(infra, "internet", "subnet-web", port=80)
+print(result.reachable)  # -> True (Risk Alert!)
+
+# Convert to structured diagnostic for CI/CD enforcement
+diagnostic = NetworkGuard.to_diagnostic(result)
+print(diagnostic.status.value)  # -> VERIFIED / BLOCKED / UNVERIFIABLE
 ```
 
 ### Enforce Budget
