@@ -90,7 +90,12 @@ class CostGuard:
 
         instances = resources.get("instances", [])
         for inst in instances:
-            inst_type = inst.get("instance_type", "t3.micro")
+            inst_type = inst.get("instance_type")
+            if inst_type is None:
+                inst_id = inst.get("id", "<missing-id>")
+                breakdown[f"unknown-{inst_id}"] = 0.0
+                unknown_instance_types.append("<missing>")
+                continue
             count = inst.get("count", 1)
             price = self.PRICING_CATALOG.get(inst_type)
             if price is None:
@@ -100,7 +105,7 @@ class CostGuard:
 
             cost = price * count
             total_hourly_cost += cost
-            breakdown[inst['id']] = cost * self.HOURS_PER_MONTH
+            breakdown[inst.get('id', inst_type)] = cost * self.HOURS_PER_MONTH
 
         volumes = resources.get("volumes", [])
         for vol in volumes:

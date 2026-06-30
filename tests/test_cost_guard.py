@@ -116,3 +116,38 @@ def test_unknown_volume_type_to_diagnostic_blocked(guard):
     assert diagnostic.status.value == "BLOCKED"
     assert diagnostic.developer_fields["has_unknown_types"] is True
     assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "COST_UNKNOWN_RESOURCE"
+
+
+def test_missing_instance_type_fails_closed(guard):
+    resources = {
+        "instances": [
+            {"id": "no-type-instance", "count": 1}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "<missing>" in result.reason
+    assert "unknown-no-type-instance" in result.breakdown
+
+
+def test_missing_instance_id_fails_closed(guard):
+    resources = {
+        "instances": [
+            {"instance_type": "nano.unknown"}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "unknown-nano.unknown" in result.breakdown
+
+
+def test_missing_both_id_and_type_fails_closed(guard):
+    resources = {
+        "instances": [{}]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "<missing>" in result.reason
