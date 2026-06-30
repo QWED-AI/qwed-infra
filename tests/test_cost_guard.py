@@ -12,7 +12,7 @@ def test_cost_under_budget(guard):
             {"id": "db-1", "instance_type": "db.t3.micro", "count": 1} # 0.017/hr
         ],
         "volumes": [
-            {"id": "vol-1", "size_gb": 10} # 10 * 0.0000315 = 0.000315/hr
+            {"id": "vol-1", "volume_type": "gp2", "size_gb": 10} # 10 * 0.0000315 = 0.000315/hr
         ]
     }
     # Total/hr = 0.038115
@@ -50,7 +50,7 @@ def test_unknown_instance_type_handled(guard):
     assert "unknown-weird-instance" in result.breakdown  # keyed by inst id
 
 
-def test_unknown_volume_type_handled(guard):
+def test_known_io2_volume_within_budget(guard):
     resources = {
         "volumes": [
             {"id": "vol-io2-1", "volume_type": "io2", "size_gb": 100}
@@ -86,7 +86,7 @@ def test_mixed_known_and_unknown_volumes(guard):
     assert result.within_budget is False
     assert result.has_unknown_types is True
     assert "super-disk" in result.reason
-    assert "unknown-unknown" in result.breakdown or "unknown-vol-unknown" in result.breakdown
+    assert "unknown-vol-unknown" in result.breakdown
 
 
 def test_known_volume_type_correctly_priced(guard):

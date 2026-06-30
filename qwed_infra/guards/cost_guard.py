@@ -43,6 +43,8 @@ class CostGuard:
         # EBS storage (USD per GB-hour)
         "gp2-storage-gb": 0.0000315,
         "gp3-storage-gb": 0.0000288,
+        # io1/io2 per-GB storage cost only — provisioned IOPS charges
+        # (approx $0.065/IOPS-month) are not captured in this estimate
         "io1-storage-gb": 0.000171,
         "io2-storage-gb": 0.000171,
         "st1-storage-gb": 0.000062,
@@ -74,8 +76,12 @@ class CostGuard:
 
         volumes = resources.get("volumes", [])
         for vol in volumes:
-            vol_type = vol.get("volume_type", "gp2")
+            vol_type = vol.get("volume_type")
             size_gb = vol.get("size_gb", 10)
+            if vol_type is None:
+                breakdown[f"unknown-{vol.get('id', 'missing-volume-type')}"] = 0.0
+                unknown_volume_types.append("<missing>")
+                continue
             key = f"{vol_type}-storage-gb"
             price_per_gb_hour = self.PRICING_CATALOG.get(key)
             if price_per_gb_hour is None:
