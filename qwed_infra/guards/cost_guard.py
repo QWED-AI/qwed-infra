@@ -54,6 +54,34 @@ class CostGuard:
 
     HOURS_PER_MONTH = 730
 
+    @staticmethod
+    def _build_reason(
+        total_monthly: float,
+        budget_monthly: float,
+        unknown_instance_types: list,
+        unknown_volume_types: list,
+    ) -> tuple:
+        parts = []
+        if unknown_instance_types:
+            parts.append(f"unknown instance types: {sorted(set(unknown_instance_types))}")
+        if unknown_volume_types:
+            parts.append(f"unknown volume types: {sorted(set(unknown_volume_types))}")
+        if parts:
+            reason = (
+                f"Cost estimate incomplete — {'; '.join(parts)}. "
+                f"Known cost ${total_monthly:.2f} vs budget ${budget_monthly:.2f}."
+            )
+            return reason, False
+        if total_monthly <= budget_monthly:
+            return (
+                f"Estimated cost ${total_monthly:.2f} is within budget ${budget_monthly:.2f}",
+                True,
+            )
+        return (
+            f"Estimated cost ${total_monthly:.2f} EXCEEDS budget ${budget_monthly:.2f}",
+            False,
+        )
+
     def verify_budget(self, resources: Dict[str, Any], budget_monthly: float) -> CostEstimate:
         total_hourly_cost = 0.0
         breakdown = {}
@@ -94,28 +122,9 @@ class CostGuard:
 
         total_monthly = total_hourly_cost * self.HOURS_PER_MONTH
         has_unknown = bool(unknown_instance_types) or bool(unknown_volume_types)
-
-        if has_unknown:
-            parts = []
-            if unknown_instance_types:
-                parts.append(
-                    f"unknown instance types: {sorted(set(unknown_instance_types))}"
-                )
-            if unknown_volume_types:
-                parts.append(
-                    f"unknown volume types: {sorted(set(unknown_volume_types))}"
-                )
-            reason = (
-                f"Cost estimate incomplete — {'; '.join(parts)}. "
-                f"Known cost ${total_monthly:.2f} vs budget ${budget_monthly:.2f}."
-            )
-            within_budget = False
-        elif total_monthly <= budget_monthly:
-            within_budget = True
-            reason = f"Estimated cost ${total_monthly:.2f} is within budget ${budget_monthly:.2f}"
-        else:
-            within_budget = False
-            reason = f"Estimated cost ${total_monthly:.2f} EXCEEDS budget ${budget_monthly:.2f}"
+        reason, within_budget = self._build_reason(
+            total_monthly, budget_monthly, unknown_instance_types, unknown_volume_types
+        )
 
         return CostEstimate(
             total_monthly_cost=total_monthly,

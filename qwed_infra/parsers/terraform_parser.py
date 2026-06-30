@@ -190,7 +190,7 @@ class TerraformParser:
                 "data": {
                     "id": res_name,
                     "size_gb": config.get("size", 10),
-                    "volume_type": config.get("type", "gp2"),
+                    "volume_type": config.get("type"),
                 },
             }
 
