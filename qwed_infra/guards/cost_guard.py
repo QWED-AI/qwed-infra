@@ -99,14 +99,16 @@ class CostGuard:
         for inst in instances:
             inst_type = inst.get("instance_type")
             if inst_type is None:
-                inst_id = inst.get("id", "<missing-id>")
-                breakdown[f"unknown-{inst_id}"] = 0.0
+                inst_id = inst.get("id") or "<missing-id>"
+                key = self._unique_key(breakdown, f"unknown-{inst_id}")
+                breakdown[key] = 0.0
                 unknown_instance_types.append("<missing>")
                 continue
             count = inst.get("count", 1)
             price = self.PRICING_CATALOG.get(inst_type)
             if price is None:
-                breakdown[f"unknown-{inst.get('id', inst_type)}"] = 0.0
+                key = self._unique_key(breakdown, f"unknown-{inst.get('id') or inst_type}")
+                breakdown[key] = 0.0
                 unknown_instance_types.append(inst_type)
                 continue
 
@@ -120,13 +122,15 @@ class CostGuard:
             vol_type = vol.get("volume_type")
             size_gb = vol.get("size_gb", 10)
             if vol_type is None:
-                breakdown[f"unknown-{vol.get('id', 'missing-volume-type')}"] = 0.0
+                key = self._unique_key(breakdown, f"unknown-{vol.get('id') or 'missing-volume-type'}")
+                breakdown[key] = 0.0
                 unknown_volume_types.append("<missing>")
                 continue
             key = f"{vol_type}-storage-gb"
             price_per_gb_hour = self.PRICING_CATALOG.get(key)
             if price_per_gb_hour is None:
-                breakdown[f"unknown-{vol.get('id', vol_type)}"] = 0.0
+                key = self._unique_key(breakdown, f"unknown-{vol.get('id') or vol_type}")
+                breakdown[key] = 0.0
                 unknown_volume_types.append(vol_type)
                 continue
             cost = size_gb * price_per_gb_hour
