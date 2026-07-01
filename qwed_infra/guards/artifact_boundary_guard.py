@@ -175,6 +175,9 @@ class ArtifactBoundaryGuard:
         data, err = ArtifactBoundaryGuard._try_load_toml(pyproject_path, pp_name)
         if err:
             return err
+        backend = data.get("build-system", {}).get("build-backend", "")
+        if backend and not backend.startswith("hatchling"):
+            return findings
         wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
         findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
         return findings
@@ -267,6 +270,11 @@ class ArtifactBoundaryGuard:
         return mapping.get(finding_type, ARTIFACT_MISSING_CONTROL)
 
     @staticmethod
+    def _finding_priority(finding_type: str) -> int:
+        order = ["secret_leak", "unknown_boundary", "debug_inclusion", "missing_control"]
+        return order.index(finding_type) if finding_type in order else len(order)
+
+    @staticmethod
     def to_diagnostic(result: ArtifactBoundaryResult) -> InfraDiagnosticResult:
         blocked = [f for f in result.findings if f.severity == "BLOCK"]
 
@@ -286,7 +294,7 @@ class ArtifactBoundaryGuard:
                 evidence={**trace, "file_count": len(result.package_files)},
             )
 
-        finding_types = sorted({f.finding_type for f in blocked})
+        finding_types = sorted({f.finding_type for f in blocked}, key=ArtifactBoundaryGuard._finding_priority)
         rule_ids = [ArtifactBoundaryGuard._get_rule_ref_for_finding(ft).rule_id for ft in finding_types]
         primary_ft = finding_types[0] if finding_types else "missing_control"
         trace = build_trace(ArtifactBoundaryGuard._get_rule_ref_for_finding(primary_ft), "BLOCKED")

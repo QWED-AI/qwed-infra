@@ -349,3 +349,18 @@ def test_default_pyproject_path_resolved_from_package_dir(guard, tmp_path):
         package_dir=str(pkg), package_name="mypkg",
     )
     assert result.is_safe is True
+
+
+def test_non_hatch_backend_skips_wheel_check(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[build-system]\nbuild-backend = 'setuptools.build_meta'\nrequires = ['setuptools']\n\n[project]\nname = 'mypkg'\nversion = '0.1.0'\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is True
