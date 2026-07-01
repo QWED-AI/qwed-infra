@@ -107,11 +107,11 @@ class TestNetworkGuardToDiagnostic:
 class TestCostGuardToDiagnostic:
     def test_within_budget(self):
         result = CostEstimate(
-            total_monthly_cost=50.0,
-            breakdown={"web": 50.0},
+            total_monthly_cost="27.82",
+            breakdown={"web": "27.82"},
             within_budget=True,
-            budget=100.0,
-            reason="Estimated cost $50.00 is within budget $100.00",
+            budget="100.00",
+            reason="Estimated cost $27.82 is within budget $100.00",
         )
         diagnostic = CostGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
@@ -121,11 +121,11 @@ class TestCostGuardToDiagnostic:
 
     def test_exceeds_budget(self):
         result = CostEstimate(
-            total_monthly_cost=200.0,
-            breakdown={"web": 200.0},
+            total_monthly_cost="23922.10",
+            breakdown={"web": "23922.10"},
             within_budget=False,
-            budget=100.0,
-            reason="Estimated cost $200.00 EXCEEDS budget $100.00",
+            budget="100.00",
+            reason="Estimated cost $23922.10 EXCEEDS budget $100.00",
         )
         diagnostic = CostGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
@@ -136,10 +136,10 @@ class TestCostGuardToDiagnostic:
 
     def test_unknown_instance_type(self):
         result = CostEstimate(
-            total_monthly_cost=50.0,
+            total_monthly_cost="50.00",
             breakdown={},
             within_budget=False,
-            budget=100.0,
+            budget="100.00",
             reason="Cost estimate incomplete \u2014 unknown instance types: ['g6.xlarge']. Known cost $50.00 vs budget $100.00.",
             has_unknown_types=True,
         )
@@ -162,10 +162,10 @@ class TestCostGuardToDiagnostic:
 
     def test_mismatched_within_budget_blocked(self):
         result = CostEstimate(
-            total_monthly_cost=200.0,
-            breakdown={"web": 200.0},
+            total_monthly_cost="200.00",
+            breakdown={"web": "200.00"},
             within_budget=True,
-            budget=100.0,
+            budget="100.00",
             reason="Cost exceeds budget but claims within_budget",
         )
         diagnostic = CostGuard.to_diagnostic(result)
@@ -197,10 +197,10 @@ class TestPydanticExtraForbid:
 
         with pytest.raises(pydantic.ValidationError):
             CostEstimate(
-                total_monthly_cost=0,
+                total_monthly_cost="0.00",
                 breakdown={},
                 within_budget=True,
-                budget=100,
+                budget="100.00",
                 reason="ok",
                 extra="bad",
             )
