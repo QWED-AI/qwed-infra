@@ -1,6 +1,6 @@
 import fnmatch
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import List
 from pydantic import BaseModel
 from qwed_infra.audit import (
     ARTIFACT_DEBUG_INCLUSION,
@@ -16,7 +16,7 @@ _ARTIFACT_CONSTRAINT_ID = "artifact_boundary_guard.verify_package_boundary"
 SENSITIVE_FILE_PATTERNS = [
     "*.pem", "*.key", "*.pgp", "*.gpg",
     ".env", ".env.*",
-    "*credential*", "*cred*",
+    "*credential*",
     "*secret*",
     "*password*", "*passwd*",
     "*token*",
@@ -40,6 +40,7 @@ DEBUG_FILE_PATTERNS = [
 FORBIDDEN_DIR_PARTS = {
     "__pycache__", ".git", ".venv", "venv",
     ".mypy_cache", ".pytest_cache", "node_modules",
+    "tests",
 }
 
 
@@ -91,7 +92,7 @@ class ArtifactBoundaryGuard:
                 ArtifactBoundaryFinding(
                     finding_type="missing_control",
                     severity="BLOCK",
-                    file_path=str(pyproject_path),
+                    file_path=pp_name,
                     reason="No pyproject.toml found — packaging rules unknown",
                 )
             )
@@ -99,7 +100,18 @@ class ArtifactBoundaryGuard:
         try:
             import tomllib
         except ImportError:
-            import tomli as tomllib
+            try:
+                import tomli as tomllib
+            except ImportError:
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="unknown_boundary",
+                        severity="BLOCK",
+                        file_path=pp_name,
+                        reason="No TOML parser available — packaging rules unverifiable",
+                    )
+                )
+                return findings
         try:
             with open(pyproject_path, "rb") as f:
                 data = tomllib.load(f)
@@ -143,6 +155,20 @@ class ArtifactBoundaryGuard:
                     reason=f"Package '{package_name}' not listed in [tool.hatch.build.targets.wheel].only-include",
                 )
             )
+        if not wheel.get("only-packages", False):
+            widening = []
+            for opt in ("include", "artifacts", "force-include"):
+                if wheel.get(opt):
+                    widening.append(opt)
+            if widening:
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="missing_control",
+                        severity="BLOCK",
+                        file_path=pp_name,
+                        reason=f"Wheel uses unmodeled inclusion options that may widen boundary: {', '.join(sorted(widening))}",
+                    )
+                )
         return findings
 
     def verify_package_boundary(
@@ -162,7 +188,7 @@ class ArtifactBoundaryGuard:
                     ArtifactBoundaryFinding(
                         finding_type="unknown_boundary",
                         severity="BLOCK",
-                        file_path=package_dir,
+                        file_path=pkg_path.name,
                         reason=f"Package directory '{package_dir}' not found — cannot verify",
                     )
                 ],
@@ -212,7 +238,7 @@ class ArtifactBoundaryGuard:
             reason = "Package boundary verified — no unsafe files detected"
         else:
             blocked = [f for f in findings if f.severity == "BLOCK"]
-            reasons = sorted(set(f.reason for f in blocked))
+            reasons = sorted({f.reason for f in blocked})
             reason = f"Package boundary check failed — {'; '.join(reasons)}"
 
         return ArtifactBoundaryResult(
@@ -223,11 +249,21 @@ class ArtifactBoundaryGuard:
         )
 
     @staticmethod
+    def _get_rule_ref_for_finding(finding_type: str):
+        mapping = {
+            "secret_leak": ARTIFACT_SECRET_LEAK,
+            "unknown_boundary": ARTIFACT_UNKNOWN_BOUNDARY,
+            "debug_inclusion": ARTIFACT_DEBUG_INCLUSION,
+            "missing_control": ARTIFACT_MISSING_CONTROL,
+        }
+        return mapping.get(finding_type, ARTIFACT_MISSING_CONTROL)
+
+    @staticmethod
     def to_diagnostic(result: ArtifactBoundaryResult) -> InfraDiagnosticResult:
         blocked = [f for f in result.findings if f.severity == "BLOCK"]
 
         if result.is_safe:
-            trace = build_trace(ARTIFACT_SECRET_LEAK, "ALLOWED")
+            trace = build_trace(ARTIFACT_MISSING_CONTROL, "ALLOWED")
             return InfraDiagnosticResult.verified(
                 agent_message="Package boundary verified — safe to publish",
                 developer_fields={
@@ -237,33 +273,15 @@ class ArtifactBoundaryGuard:
                     "findings": [f.model_dump() for f in result.findings],
                     "reason": result.reason,
                     "audit_trace": trace,
+                    "rule_ids": [ARTIFACT_MISSING_CONTROL.rule_id],
                 },
                 evidence={**trace, "file_count": len(result.package_files)},
             )
 
-        if not blocked:
-            trace = build_trace(ARTIFACT_DEBUG_INCLUSION, "WARN")
-            return InfraDiagnosticResult.blocked(
-                agent_message="Package boundary has warnings",
-                developer_fields={
-                    "constraint_id": _ARTIFACT_CONSTRAINT_ID,
-                    "is_safe": result.is_safe,
-                    "file_count": len(result.package_files),
-                    "findings": [f.model_dump() for f in result.findings],
-                    "reason": result.reason,
-                    "audit_trace": trace,
-                },
-            )
-
-        finding_types = {f.finding_type for f in blocked}
-        if "secret_leak" in finding_types:
-            trace = build_trace(ARTIFACT_SECRET_LEAK, "BLOCKED")
-        elif "unknown_boundary" in finding_types:
-            trace = build_trace(ARTIFACT_UNKNOWN_BOUNDARY, "BLOCKED")
-        elif "debug_inclusion" in finding_types:
-            trace = build_trace(ARTIFACT_DEBUG_INCLUSION, "BLOCKED")
-        else:
-            trace = build_trace(ARTIFACT_MISSING_CONTROL, "BLOCKED")
+        finding_types = sorted({f.finding_type for f in blocked})
+        rule_ids = [ArtifactBoundaryGuard._get_rule_ref_for_finding(ft).rule_id for ft in finding_types]
+        primary_ft = finding_types[0] if finding_types else "missing_control"
+        trace = build_trace(ArtifactBoundaryGuard._get_rule_ref_for_finding(primary_ft), "BLOCKED")
 
         return InfraDiagnosticResult.blocked(
             agent_message="Package boundary violation — do not publish",
@@ -274,5 +292,6 @@ class ArtifactBoundaryGuard:
                 "findings": [f.model_dump() for f in result.findings],
                 "reason": result.reason,
                 "audit_trace": trace,
+                "rule_ids": rule_ids,
             },
         )

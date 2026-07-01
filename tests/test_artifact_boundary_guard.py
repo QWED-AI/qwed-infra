@@ -1,10 +1,7 @@
-import os
-import tempfile
 from pathlib import Path
 import pytest
 from qwed_infra.guards.artifact_boundary_guard import (
     ArtifactBoundaryGuard,
-    ArtifactBoundaryResult,
 )
 from qwed_infra.diagnostics import InfraDiagnosticStatus
 
@@ -31,6 +28,7 @@ def test_to_diagnostic_verified(guard):
     diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
     assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
     assert diagnostic.is_verified is True
+    assert "rule_ids" in diagnostic.developer_fields
 
 
 def test_detects_pem_file(guard, tmp_path):
@@ -183,6 +181,8 @@ def test_to_diagnostic_blocked_secret(guard, tmp_path):
     diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
     assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
     assert diagnostic.is_verified is False
+    assert "rule_ids" in diagnostic.developer_fields
+    assert len(diagnostic.developer_fields["rule_ids"]) >= 1
 
 
 def test_to_diagnostic_blocked_debug(guard, tmp_path):
@@ -192,11 +192,12 @@ def test_to_diagnostic_blocked_debug(guard, tmp_path):
     diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
     assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
     assert diagnostic.is_verified is False
+    assert "rule_ids" in diagnostic.developer_fields
 
 
 def test_findings_have_correct_fields(guard, tmp_path):
     pkg = tmp_path / "mypkg"
-    file = _write_file(pkg / "secret.pem")
+    _write_file(pkg / "secret.pem")
     result = guard.verify_package_boundary(package_dir=str(pkg))
     finding = next(f for f in result.findings if f.finding_type == "secret_leak")
     assert finding.severity == "BLOCK"
@@ -209,7 +210,106 @@ def test_excludes_forbidden_dirs(guard, tmp_path):
     _write_file(pkg / "__pycache__" / "cached.pyc")
     _write_file(pkg / "module.py")
     result = guard.verify_package_boundary(package_dir=str(pkg))
-    # __pycache__ contents should be excluded from package_files
     assert not any("__pycache__" in f for f in result.package_files)
-    # module.py should be present
     assert any("module.py" in f for f in result.package_files)
+
+
+def test_excludes_tests_subdirectory(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    _write_file(pkg / "tests" / "test_foo.py")
+    _write_file(pkg / "module.py")
+    result = guard.verify_package_boundary(package_dir=str(pkg))
+    assert not any("tests" in f for f in result.package_files)
+    assert any("module.py" in f for f in result.package_files)
+
+
+def test_to_diagnostic_multi_rule_blocked(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    _write_file(pkg / "secret.pem")
+    _write_file(pkg / "test_foo.py")
+    result = guard.verify_package_boundary(package_dir=str(pkg))
+    diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
+    assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
+    rule_ids = diagnostic.developer_fields["rule_ids"]
+    assert len(rule_ids) >= 2
+
+
+def test_missing_pyproject_uses_filename_only(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "nonexistent.toml")
+    )
+    finding = next(f for f in result.findings if f.finding_type == "missing_control")
+    assert finding.file_path == "nonexistent.toml"
+    assert "/" not in finding.file_path
+
+
+def test_missing_directory_uses_basename(guard):
+    result = guard.verify_package_boundary(package_dir="/nonexistent/path")
+    finding = next(f for f in result.findings if f.finding_type == "unknown_boundary")
+    assert finding.file_path == "path"
+
+
+def test_wheel_include_option_blocks(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\ninclude = ['extra/*']\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is False
+    assert any("include" in f.reason for f in result.findings)
+
+
+def test_wheel_artifacts_option_blocks(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nartifacts = ['generated/*']\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is False
+    assert any("artifacts" in f.reason for f in result.findings)
+
+
+def test_wheel_force_include_option_blocks(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nforce-include = {'/etc/config' = 'config'}\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is False
+    assert any("force-include" in f.reason for f in result.findings)
+
+
+def test_wheel_only_packages_allows_widening_opts(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\ninclude = ['extra/*']\nonly-packages = true\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is True
