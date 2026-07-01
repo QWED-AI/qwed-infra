@@ -136,7 +136,7 @@ class ArtifactBoundaryGuard:
                 )
             )
         only_include = wheel.get("only-include", [])
-        if only_include and package_name not in only_include:
+        if only_include and not any(package_name in Path(e).parts for e in only_include):
             findings.append(
                 ArtifactBoundaryFinding(
                     finding_type="missing_control",
@@ -182,11 +182,11 @@ class ArtifactBoundaryGuard:
     def verify_package_boundary(
         self,
         package_dir: str = "qwed_infra",
-        pyproject_path: str = "pyproject.toml",
+        pyproject_path: str | None = None,
         package_name: str = "qwed_infra",
     ) -> ArtifactBoundaryResult:
         pkg_path = Path(package_dir)
-        pyproj_path = Path(pyproject_path)
+        pyproj_path = Path(pyproject_path) if pyproject_path is not None else pkg_path.parent / "pyproject.toml"
         findings: List[ArtifactBoundaryFinding] = []
 
         if not pkg_path.is_dir():

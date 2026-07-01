@@ -320,3 +320,32 @@ def test_file_named_tests_not_excluded(guard, tmp_path):
     _write_file(pkg / "tests", "#!/usr/bin/env python")
     result = guard.verify_package_boundary(package_dir=str(pkg))
     assert any("tests" in f for f in result.package_files)
+
+
+def test_only_include_with_path_entries_passes(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['src/mypkg', 'mypkg/extra']\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is True
+
+
+def test_default_pyproject_path_resolved_from_package_dir(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), package_name="mypkg",
+    )
+    assert result.is_safe is True
