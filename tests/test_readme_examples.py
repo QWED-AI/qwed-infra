@@ -21,7 +21,7 @@ def test_network_guard_readme_example():
     result = net.verify_reachability(infra, "internet", "subnet-web", port=80)
     assert result.reachable is True
     diagnostic = NetworkGuard.to_diagnostic(result)
-    assert diagnostic.status.value in ("VERIFIED", "BLOCKED", "UNVERIFIABLE")
+    assert diagnostic.status.value == "VERIFIED"
 
 
 def test_cost_guard_readme_example():
