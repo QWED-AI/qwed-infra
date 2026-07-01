@@ -47,10 +47,7 @@ class CostGuard:
         # EBS storage (USD per GB-hour)
         "gp2-storage-gb": "0.0000315",
         "gp3-storage-gb": "0.0000288",
-        # io1/io2 per-GB storage cost only — provisioned IOPS charges
-        # (approx $0.065/IOPS-month) are not captured in this estimate
-        "io1-storage-gb": "0.000171",
-        "io2-storage-gb": "0.000171",
+        # io1/io2 IOPS charges (~$0.065/IOPS-month) not captured — omit to fail closed
         "st1-storage-gb": "0.000062",
         "sc1-storage-gb": "0.000021",
         "standard-storage-gb": "0.000068",
@@ -106,6 +103,12 @@ class CostGuard:
             unknown_instance_types.append("<missing>")
             return Decimal("0")
         count = inst.get("count", 1)
+        if not isinstance(count, int) or count < 1:
+            inst_id = inst.get("id") or inst_type
+            key = self._unique_key(breakdown, f"invalid-count-{inst_id}")
+            breakdown[key] = decimal_text(Decimal("0.00"))
+            unknown_instance_types.append(f"invalid count ({count})")
+            return Decimal("0")
         price_str = self.PRICING_CATALOG.get(inst_type)
         if price_str is None:
             key = self._unique_key(breakdown, f"unknown-{inst.get('id') or inst_type}")
@@ -123,11 +126,16 @@ class CostGuard:
         self, vol: dict, breakdown: dict, unknown_volume_types: list
     ) -> Decimal:
         vol_type = vol.get("volume_type")
-        size_gb = vol.get("size_gb", 10)
         if vol_type is None:
             key = self._unique_key(breakdown, f"unknown-{vol.get('id') or 'missing-volume-type'}")
             breakdown[key] = decimal_text(Decimal("0.00"))
             unknown_volume_types.append("<missing>")
+            return Decimal("0")
+        size_gb = vol.get("size_gb")
+        if not isinstance(size_gb, int) or size_gb < 1:
+            key = self._unique_key(breakdown, f"invalid-size-{vol.get('id') or vol_type}")
+            breakdown[key] = decimal_text(Decimal("0.00"))
+            unknown_volume_types.append(f"invalid size_gb ({size_gb})")
             return Decimal("0")
         key = f"{vol_type}-storage-gb"
         price_str = self.PRICING_CATALOG.get(key)
@@ -173,8 +181,22 @@ class CostGuard:
 
     @staticmethod
     def to_diagnostic(result: CostEstimate) -> InfraDiagnosticResult:
-        total = parse_decimal_input(result.total_monthly_cost, "total_monthly_cost")
-        budget = parse_decimal_input(result.budget, "budget")
+        try:
+            total = parse_decimal_input(result.total_monthly_cost, "total_monthly_cost")
+            budget = parse_decimal_input(result.budget, "budget")
+        except ValueError:
+            return InfraDiagnosticResult.blocked(
+                agent_message="Cost estimate could not be verified",
+                developer_fields={
+                    "constraint_id": _COST_CONSTRAINT_ID,
+                    "within_budget": result.within_budget,
+                    "total_monthly_cost": result.total_monthly_cost,
+                    "budget": result.budget,
+                    "reason": result.reason,
+                    "has_unknown_types": result.has_unknown_types,
+                    "audit_trace": build_trace(COST_UNKNOWN_RESOURCE, "INVALID_INPUT"),
+                },
+            )
         total_q = total.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
         budget_q = budget.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
         expected_within_budget = (
