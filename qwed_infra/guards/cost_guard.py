@@ -1,3 +1,4 @@
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict
 from pydantic import BaseModel
 from qwed_infra.audit import (
@@ -7,17 +8,20 @@ from qwed_infra.audit import (
     build_trace,
 )
 from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.numeric import decimal_text, parse_decimal_input
 
 _COST_CONSTRAINT_ID = "cost_guard.verify_budget"
+
+TWO_PLACES = Decimal("0.01")
 
 
 class CostEstimate(BaseModel):
     model_config = {"extra": "forbid"}
-    total_monthly_cost: float
+    total_monthly_cost: str
     currency: str = "USD"
-    breakdown: Dict[str, float]
+    breakdown: Dict[str, str]
     within_budget: bool
-    budget: float
+    budget: str
     reason: str
     has_unknown_types: bool = False
 
@@ -30,29 +34,29 @@ class CostGuard:
 
     PRICING_CATALOG = {
         # EC2 instances (USD per hour)
-        "t3.micro": 0.0104,
-        "t3.small": 0.0208,
-        "t3.medium": 0.0416,
-        "m5.large": 0.096,
-        "c5.large": 0.085,
-        "g4dn.xlarge": 0.526,
-        "p4d.24xlarge": 32.77,
+        "t3.micro": "0.0104",
+        "t3.small": "0.0208",
+        "t3.medium": "0.0416",
+        "m5.large": "0.096",
+        "c5.large": "0.085",
+        "g4dn.xlarge": "0.526",
+        "p4d.24xlarge": "32.77",
         # RDS instances (USD per hour)
-        "db.t3.micro": 0.017,
-        "db.m5.large": 0.142,
+        "db.t3.micro": "0.017",
+        "db.m5.large": "0.142",
         # EBS storage (USD per GB-hour)
-        "gp2-storage-gb": 0.0000315,
-        "gp3-storage-gb": 0.0000288,
+        "gp2-storage-gb": "0.0000315",
+        "gp3-storage-gb": "0.0000288",
         # io1/io2 per-GB storage cost only — provisioned IOPS charges
         # (approx $0.065/IOPS-month) are not captured in this estimate
-        "io1-storage-gb": 0.000171,
-        "io2-storage-gb": 0.000171,
-        "st1-storage-gb": 0.000062,
-        "sc1-storage-gb": 0.000021,
-        "standard-storage-gb": 0.000068,
+        "io1-storage-gb": "0.000171",
+        "io2-storage-gb": "0.000171",
+        "st1-storage-gb": "0.000062",
+        "sc1-storage-gb": "0.000021",
+        "standard-storage-gb": "0.000068",
     }
 
-    HOURS_PER_MONTH = 730
+    HOURS_PER_MONTH = Decimal("730")
 
     @staticmethod
     def _unique_key(breakdown: dict, key: str) -> str:
@@ -63,8 +67,8 @@ class CostGuard:
 
     @staticmethod
     def _build_reason(
-        total_monthly: float,
-        budget_monthly: float,
+        total_monthly: Decimal,
+        budget_monthly: Decimal,
         unknown_instance_types: list,
         unknown_volume_types: list,
     ) -> tuple:
@@ -73,68 +77,75 @@ class CostGuard:
             parts.append(f"unknown instance types: {sorted(set(unknown_instance_types))}")
         if unknown_volume_types:
             parts.append(f"unknown volume types: {sorted(set(unknown_volume_types))}")
+        total_q = total_monthly.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
+        budget_q = budget_monthly.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
         if parts:
             reason = (
                 f"Cost estimate incomplete — {'; '.join(parts)}. "
-                f"Known cost ${total_monthly:.2f} vs budget ${budget_monthly:.2f}."
+                f"Known cost ${decimal_text(total_q)} vs budget ${decimal_text(budget_q)}."
             )
             return reason, False
-        if total_monthly <= budget_monthly:
+        if total_q <= budget_q:
             return (
-                f"Estimated cost ${total_monthly:.2f} is within budget ${budget_monthly:.2f}",
+                f"Estimated cost ${decimal_text(total_q)} is within budget ${decimal_text(budget_q)}",
                 True,
             )
         return (
-            f"Estimated cost ${total_monthly:.2f} EXCEEDS budget ${budget_monthly:.2f}",
+            f"Estimated cost ${decimal_text(total_q)} EXCEEDS budget ${decimal_text(budget_q)}",
             False,
         )
 
     def _process_instance(
         self, inst: dict, breakdown: dict, unknown_instance_types: list
-    ) -> float:
+    ) -> Decimal:
         inst_type = inst.get("instance_type")
         if inst_type is None:
             inst_id = inst.get("id") or "<missing-id>"
             key = self._unique_key(breakdown, f"unknown-{inst_id}")
-            breakdown[key] = 0.0
+            breakdown[key] = decimal_text(Decimal("0.00"))
             unknown_instance_types.append("<missing>")
-            return 0.0
+            return Decimal("0")
         count = inst.get("count", 1)
-        price = self.PRICING_CATALOG.get(inst_type)
-        if price is None:
+        price_str = self.PRICING_CATALOG.get(inst_type)
+        if price_str is None:
             key = self._unique_key(breakdown, f"unknown-{inst.get('id') or inst_type}")
-            breakdown[key] = 0.0
+            breakdown[key] = decimal_text(Decimal("0.00"))
             unknown_instance_types.append(inst_type)
-            return 0.0
-        cost = price * count
+            return Decimal("0")
+        price = Decimal(price_str)
+        cost = price * int(count)
+        monthly = cost * self.HOURS_PER_MONTH
         key = self._unique_key(breakdown, inst.get('id') or inst_type)
-        breakdown[key] = cost * self.HOURS_PER_MONTH
+        breakdown[key] = decimal_text(monthly)
         return cost
 
     def _process_volume(
         self, vol: dict, breakdown: dict, unknown_volume_types: list
-    ) -> float:
+    ) -> Decimal:
         vol_type = vol.get("volume_type")
         size_gb = vol.get("size_gb", 10)
         if vol_type is None:
             key = self._unique_key(breakdown, f"unknown-{vol.get('id') or 'missing-volume-type'}")
-            breakdown[key] = 0.0
+            breakdown[key] = decimal_text(Decimal("0.00"))
             unknown_volume_types.append("<missing>")
-            return 0.0
+            return Decimal("0")
         key = f"{vol_type}-storage-gb"
-        price_per_gb_hour = self.PRICING_CATALOG.get(key)
-        if price_per_gb_hour is None:
+        price_str = self.PRICING_CATALOG.get(key)
+        if price_str is None:
             key = self._unique_key(breakdown, f"unknown-{vol.get('id') or vol_type}")
-            breakdown[key] = 0.0
+            breakdown[key] = decimal_text(Decimal("0.00"))
             unknown_volume_types.append(vol_type)
-            return 0.0
-        cost = size_gb * price_per_gb_hour
+            return Decimal("0")
+        price_per_gb = Decimal(price_str)
+        cost = price_per_gb * int(size_gb)
+        monthly = cost * self.HOURS_PER_MONTH
         key = self._unique_key(breakdown, f"vol-{vol.get('id', 'unknown')}")
-        breakdown[key] = cost * self.HOURS_PER_MONTH
+        breakdown[key] = decimal_text(monthly)
         return cost
 
-    def verify_budget(self, resources: Dict[str, Any], budget_monthly: float) -> CostEstimate:
-        total_hourly_cost = 0.0
+    def verify_budget(self, resources: Dict[str, Any], budget_monthly: object) -> CostEstimate:
+        budget = parse_decimal_input(budget_monthly, "budget_monthly")
+        total_hourly_cost = Decimal("0")
         breakdown = {}
         unknown_instance_types = []
         unknown_volume_types = []
@@ -145,24 +156,29 @@ class CostGuard:
             total_hourly_cost += self._process_volume(vol, breakdown, unknown_volume_types)
 
         total_monthly = total_hourly_cost * self.HOURS_PER_MONTH
+        total_q = total_monthly.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
         has_unknown = bool(unknown_instance_types) or bool(unknown_volume_types)
         reason, within_budget = self._build_reason(
-            total_monthly, budget_monthly, unknown_instance_types, unknown_volume_types
+            total_monthly, budget, unknown_instance_types, unknown_volume_types
         )
 
         return CostEstimate(
-            total_monthly_cost=total_monthly,
+            total_monthly_cost=decimal_text(total_q),
             breakdown=breakdown,
             within_budget=within_budget,
-            budget=budget_monthly,
+            budget=decimal_text(budget.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)),
             reason=reason,
             has_unknown_types=has_unknown,
         )
 
     @staticmethod
     def to_diagnostic(result: CostEstimate) -> InfraDiagnosticResult:
+        total = parse_decimal_input(result.total_monthly_cost, "total_monthly_cost")
+        budget = parse_decimal_input(result.budget, "budget")
+        total_q = total.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
+        budget_q = budget.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
         expected_within_budget = (
-            result.total_monthly_cost <= result.budget
+            total_q <= budget_q
             and not result.has_unknown_types
         )
         if result.within_budget != expected_within_budget:
