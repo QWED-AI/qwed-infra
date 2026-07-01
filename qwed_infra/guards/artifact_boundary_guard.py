@@ -65,9 +65,9 @@ class ArtifactBoundaryGuard:
 
     @staticmethod
     def _matches_any(path: Path, patterns: list) -> bool:
-        name = path.name
+        name = path.name.casefold()
         for pattern in patterns:
-            if fnmatch.fnmatch(name, pattern):
+            if fnmatch.fnmatchcase(name, pattern.casefold()):
                 return True
         return False
 
@@ -78,9 +78,6 @@ class ArtifactBoundaryGuard:
         files = []
         for f in package_dir.rglob("*"):
             if f.is_file():
-                parts = f.relative_to(package_dir).parts
-                if len(parts) > 1 and any(part in FORBIDDEN_DIR_PARTS for part in parts[:-1]):
-                    continue
                 files.append(f)
         return sorted(files)
 
@@ -114,9 +111,29 @@ class ArtifactBoundaryGuard:
             ]
 
     @staticmethod
-    def _check_wheel_config(wheel: dict, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+    def _check_wheel_config(wheel, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
         findings = []
+        if not isinstance(wheel, dict):
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="unknown_boundary",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason="Invalid [tool.hatch.build.targets.wheel] shape — packaging rules unverifiable",
+                )
+            )
+            return findings
         packages = wheel.get("packages", [])
+        if not isinstance(packages, list) or not all(isinstance(p, str) for p in packages):
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="missing_control",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason="Invalid wheel packages control — packaging boundary unknown",
+                )
+            )
+            return findings
         if not packages:
             findings.append(
                 ArtifactBoundaryFinding(
@@ -126,25 +143,58 @@ class ArtifactBoundaryGuard:
                     reason="No explicit packages in [tool.hatch.build.targets.wheel] — packaging boundary unknown",
                 )
             )
-        elif package_name not in packages:
+        else:
+            for pkg in packages:
+                if pkg != package_name and not pkg.startswith(f"{package_name}/"):
+                    findings.append(
+                        ArtifactBoundaryFinding(
+                            finding_type="missing_control",
+                            severity="BLOCK",
+                            file_path=pp_name,
+                            reason=f"Package '{pkg}' in wheel packages is outside verified boundary '{package_name}'",
+                        )
+                    )
+                    break
+            if package_name not in packages and not any(p.startswith(f"{package_name}/") for p in packages):
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="missing_control",
+                        severity="BLOCK",
+                        file_path=pp_name,
+                        reason=f"Package '{package_name}' not listed in [tool.hatch.build.targets.wheel].packages",
+                    )
+                )
+        only_include = wheel.get("only-include", [])
+        if not isinstance(only_include, list) or not all(isinstance(e, str) for e in only_include):
             findings.append(
                 ArtifactBoundaryFinding(
                     finding_type="missing_control",
                     severity="BLOCK",
                     file_path=pp_name,
-                    reason=f"Package '{package_name}' not listed in [tool.hatch.build.targets.wheel].packages",
+                    reason="Invalid wheel only-include control — packaging boundary unknown",
                 )
             )
-        only_include = wheel.get("only-include", [])
+            return findings
         if only_include and not any(package_name in Path(e).parts for e in only_include):
             findings.append(
                 ArtifactBoundaryFinding(
                     finding_type="missing_control",
                     severity="BLOCK",
                     file_path=pp_name,
-                    reason=f"Package '{package_name}' not listed in [tool.hatch.build.targets.wheel].only-include",
+                    reason=f"Package '{package_name}' not referenced in [tool.hatch.build.targets.wheel].only-include",
                 )
             )
+            for entry in only_include:
+                if package_name not in Path(entry).parts:
+                    findings.append(
+                        ArtifactBoundaryFinding(
+                            finding_type="missing_control",
+                            severity="BLOCK",
+                            file_path=pp_name,
+                            reason=f"only-include entry '{entry}' is outside verified boundary '{package_name}'",
+                        )
+                    )
+                    break
         if not wheel.get("only-packages", False):
             widening = [opt for opt in ("include", "artifacts", "force-include") if wheel.get(opt)]
             if widening:
@@ -176,10 +226,23 @@ class ArtifactBoundaryGuard:
         if err:
             return err
         backend = data.get("build-system", {}).get("build-backend", "")
-        if backend and not backend.startswith("hatchling"):
-            return findings
         wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
-        findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
+        if not isinstance(wheel, dict):
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="unknown_boundary",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason="Invalid [tool.hatch.build.targets.wheel] shape — packaging rules unverifiable",
+                )
+            )
+            return findings
+        if wheel:
+            findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
+        elif not backend or not backend.startswith("hatchling"):
+            return findings
+        else:
+            findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
         return findings
 
     def verify_package_boundary(
@@ -211,10 +274,24 @@ class ArtifactBoundaryGuard:
         rel_paths = [str(f.relative_to(pkg_path)) for f in package_files]
 
         for f in package_files:
-            rel = str(f.relative_to(pkg_path))
+            rel_path = f.relative_to(pkg_path)
+            rel = str(rel_path)
             name = f.name
+            forbidden_part = next(
+                (part for part in rel_path.parts[:-1] if part in FORBIDDEN_DIR_PARTS),
+                None,
+            )
 
-            if self._matches_any(f, SENSITIVE_FILE_PATTERNS):
+            if forbidden_part:
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="debug_inclusion",
+                        severity="BLOCK",
+                        file_path=rel,
+                        reason=f"Forbidden directory '{forbidden_part}' found in package boundary",
+                    )
+                )
+            elif self._matches_any(f, SENSITIVE_FILE_PATTERNS):
                 findings.append(
                     ArtifactBoundaryFinding(
                         finding_type="secret_leak",
