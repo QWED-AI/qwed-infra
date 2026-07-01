@@ -116,3 +116,102 @@ def test_unknown_volume_type_to_diagnostic_blocked(guard):
     assert diagnostic.status.value == "BLOCKED"
     assert diagnostic.developer_fields["has_unknown_types"] is True
     assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "COST_UNKNOWN_RESOURCE"
+
+
+def test_missing_instance_type_fails_closed(guard):
+    resources = {
+        "instances": [
+            {"id": "no-type-instance", "count": 1}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "<missing>" in result.reason
+    assert "unknown-no-type-instance" in result.breakdown
+
+
+def test_missing_instance_id_fails_closed(guard):
+    resources = {
+        "instances": [
+            {"instance_type": "nano.unknown"}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "unknown-nano.unknown" in result.breakdown
+
+
+def test_missing_both_id_and_type_fails_closed(guard):
+    resources = {
+        "instances": [{}]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "<missing>" in result.reason
+    assert "unknown-<missing-id>" in result.breakdown
+
+
+def test_id_less_instances_no_breakdown_collision(guard):
+    resources = {
+        "instances": [
+            {"instance_type": "t3.micro", "count": 2},
+            {"instance_type": "t3.micro", "count": 3},
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.within_budget is True
+    assert "t3.micro" in result.breakdown
+    assert "t3.micro#1" in result.breakdown
+    assert result.breakdown["t3.micro"] == 2 * 0.0104 * 730
+    assert result.breakdown["t3.micro#1"] == 3 * 0.0104 * 730
+
+
+def test_id_none_renders_as_missing_id(guard):
+    resources = {
+        "instances": [{"id": None}]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "unknown-<missing-id>" in result.breakdown
+
+
+def test_duplicate_unknown_instance_types_no_collision(guard):
+    resources = {
+        "instances": [
+            {"instance_type": "nonexistent-1x.small"},
+            {"instance_type": "nonexistent-1x.small"},
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "unknown-nonexistent-1x.small" in result.breakdown
+    assert "unknown-nonexistent-1x.small#1" in result.breakdown
+
+
+def test_duplicate_missing_volume_type_no_collision(guard):
+    resources = {
+        "volumes": [
+            {"size_gb": 10},
+            {"size_gb": 20},
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "unknown-missing-volume-type" in result.breakdown
+    assert "unknown-missing-volume-type#1" in result.breakdown
+
+
+def test_duplicate_unknown_volume_type_no_collision(guard):
+    resources = {
+        "volumes": [
+            {"volume_type": "nonexistent-storage", "size_gb": 10},
+            {"volume_type": "nonexistent-storage", "size_gb": 20},
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "unknown-nonexistent-storage" in result.breakdown
+    assert "unknown-nonexistent-storage#1" in result.breakdown

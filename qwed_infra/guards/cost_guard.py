@@ -55,6 +55,13 @@ class CostGuard:
     HOURS_PER_MONTH = 730
 
     @staticmethod
+    def _unique_key(breakdown: dict, key: str) -> str:
+        if key not in breakdown:
+            return key
+        suffix = sum(1 for k in breakdown if k == key or k.startswith(f"{key}#"))
+        return f"{key}#{suffix}"
+
+    @staticmethod
     def _build_reason(
         total_monthly: float,
         budget_monthly: float,
@@ -82,43 +89,60 @@ class CostGuard:
             False,
         )
 
+    def _process_instance(
+        self, inst: dict, breakdown: dict, unknown_instance_types: list
+    ) -> float:
+        inst_type = inst.get("instance_type")
+        if inst_type is None:
+            inst_id = inst.get("id") or "<missing-id>"
+            key = self._unique_key(breakdown, f"unknown-{inst_id}")
+            breakdown[key] = 0.0
+            unknown_instance_types.append("<missing>")
+            return 0.0
+        count = inst.get("count", 1)
+        price = self.PRICING_CATALOG.get(inst_type)
+        if price is None:
+            key = self._unique_key(breakdown, f"unknown-{inst.get('id') or inst_type}")
+            breakdown[key] = 0.0
+            unknown_instance_types.append(inst_type)
+            return 0.0
+        cost = price * count
+        key = self._unique_key(breakdown, inst.get('id') or inst_type)
+        breakdown[key] = cost * self.HOURS_PER_MONTH
+        return cost
+
+    def _process_volume(
+        self, vol: dict, breakdown: dict, unknown_volume_types: list
+    ) -> float:
+        vol_type = vol.get("volume_type")
+        size_gb = vol.get("size_gb", 10)
+        if vol_type is None:
+            key = self._unique_key(breakdown, f"unknown-{vol.get('id') or 'missing-volume-type'}")
+            breakdown[key] = 0.0
+            unknown_volume_types.append("<missing>")
+            return 0.0
+        key = f"{vol_type}-storage-gb"
+        price_per_gb_hour = self.PRICING_CATALOG.get(key)
+        if price_per_gb_hour is None:
+            key = self._unique_key(breakdown, f"unknown-{vol.get('id') or vol_type}")
+            breakdown[key] = 0.0
+            unknown_volume_types.append(vol_type)
+            return 0.0
+        cost = size_gb * price_per_gb_hour
+        key = self._unique_key(breakdown, f"vol-{vol.get('id', 'unknown')}")
+        breakdown[key] = cost * self.HOURS_PER_MONTH
+        return cost
+
     def verify_budget(self, resources: Dict[str, Any], budget_monthly: float) -> CostEstimate:
         total_hourly_cost = 0.0
         breakdown = {}
         unknown_instance_types = []
         unknown_volume_types = []
 
-        instances = resources.get("instances", [])
-        for inst in instances:
-            inst_type = inst.get("instance_type", "t3.micro")
-            count = inst.get("count", 1)
-            price = self.PRICING_CATALOG.get(inst_type)
-            if price is None:
-                breakdown[f"unknown-{inst.get('id', inst_type)}"] = 0.0
-                unknown_instance_types.append(inst_type)
-                continue
-
-            cost = price * count
-            total_hourly_cost += cost
-            breakdown[inst['id']] = cost * self.HOURS_PER_MONTH
-
-        volumes = resources.get("volumes", [])
-        for vol in volumes:
-            vol_type = vol.get("volume_type")
-            size_gb = vol.get("size_gb", 10)
-            if vol_type is None:
-                breakdown[f"unknown-{vol.get('id', 'missing-volume-type')}"] = 0.0
-                unknown_volume_types.append("<missing>")
-                continue
-            key = f"{vol_type}-storage-gb"
-            price_per_gb_hour = self.PRICING_CATALOG.get(key)
-            if price_per_gb_hour is None:
-                breakdown[f"unknown-{vol.get('id', vol_type)}"] = 0.0
-                unknown_volume_types.append(vol_type)
-                continue
-            cost = size_gb * price_per_gb_hour
-            total_hourly_cost += cost
-            breakdown[f"vol-{vol.get('id', 'unknown')}"] = cost * self.HOURS_PER_MONTH
+        for inst in resources.get("instances", []):
+            total_hourly_cost += self._process_instance(inst, breakdown, unknown_instance_types)
+        for vol in resources.get("volumes", []):
+            total_hourly_cost += self._process_volume(vol, breakdown, unknown_volume_types)
 
         total_monthly = total_hourly_cost * self.HOURS_PER_MONTH
         has_unknown = bool(unknown_instance_types) or bool(unknown_volume_types)
