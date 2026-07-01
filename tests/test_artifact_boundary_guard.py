@@ -28,7 +28,7 @@ def test_to_diagnostic_verified(guard):
     diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
     assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
     assert diagnostic.is_verified is True
-    assert "rule_ids" in diagnostic.developer_fields
+    assert diagnostic.developer_fields["rule_ids"] == ["ARTIFACT_BOUNDARY_VERIFIED"]
 
 
 def test_detects_pem_file(guard, tmp_path):
@@ -313,3 +313,10 @@ def test_wheel_only_packages_allows_widening_opts(guard, tmp_path):
         package_name="mypkg",
     )
     assert result.is_safe is True
+
+
+def test_file_named_tests_not_excluded(guard, tmp_path):
+    pkg = tmp_path / "mypkg"
+    _write_file(pkg / "tests", "#!/usr/bin/env python")
+    result = guard.verify_package_boundary(package_dir=str(pkg))
+    assert any("tests" in f for f in result.package_files)

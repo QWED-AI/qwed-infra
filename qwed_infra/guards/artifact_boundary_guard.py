@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List
 from pydantic import BaseModel
 from qwed_infra.audit import (
+    ARTIFACT_BOUNDARY_VERIFIED,
     ARTIFACT_DEBUG_INCLUSION,
     ARTIFACT_MISSING_CONTROL,
     ARTIFACT_SECRET_LEAK,
@@ -78,54 +79,43 @@ class ArtifactBoundaryGuard:
         for f in package_dir.rglob("*"):
             if f.is_file():
                 parts = f.relative_to(package_dir).parts
-                if any(part in FORBIDDEN_DIR_PARTS for part in parts):
+                if len(parts) > 1 and any(part in FORBIDDEN_DIR_PARTS for part in parts[:-1]):
                     continue
                 files.append(f)
         return sorted(files)
 
     @staticmethod
-    def _check_build_config(pyproject_path: Path, package_name: str) -> list[ArtifactBoundaryFinding]:
-        findings = []
-        pp_name = pyproject_path.name
-        if not pyproject_path.is_file():
-            findings.append(
-                ArtifactBoundaryFinding(
-                    finding_type="missing_control",
-                    severity="BLOCK",
-                    file_path=pp_name,
-                    reason="No pyproject.toml found — packaging rules unknown",
-                )
-            )
-            return findings
+    def _try_load_toml(pyproject_path: Path, pp_name: str):
         try:
             import tomllib
         except ImportError:
             try:
                 import tomli as tomllib
             except ImportError:
-                findings.append(
+                return None, [
                     ArtifactBoundaryFinding(
                         finding_type="unknown_boundary",
                         severity="BLOCK",
                         file_path=pp_name,
                         reason="No TOML parser available — packaging rules unverifiable",
                     )
-                )
-                return findings
+                ]
         try:
             with open(pyproject_path, "rb") as f:
-                data = tomllib.load(f)
+                return tomllib.load(f), None
         except Exception:
-            findings.append(
+            return None, [
                 ArtifactBoundaryFinding(
                     finding_type="unknown_boundary",
                     severity="BLOCK",
                     file_path=pp_name,
                     reason="Cannot parse pyproject.toml — packaging rules unverifiable",
                 )
-            )
-            return findings
-        wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+            ]
+
+    @staticmethod
+    def _check_wheel_config(wheel: dict, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+        findings = []
         packages = wheel.get("packages", [])
         if not packages:
             findings.append(
@@ -156,10 +146,7 @@ class ArtifactBoundaryGuard:
                 )
             )
         if not wheel.get("only-packages", False):
-            widening = []
-            for opt in ("include", "artifacts", "force-include"):
-                if wheel.get(opt):
-                    widening.append(opt)
+            widening = [opt for opt in ("include", "artifacts", "force-include") if wheel.get(opt)]
             if widening:
                 findings.append(
                     ArtifactBoundaryFinding(
@@ -169,6 +156,27 @@ class ArtifactBoundaryGuard:
                         reason=f"Wheel uses unmodeled inclusion options that may widen boundary: {', '.join(sorted(widening))}",
                     )
                 )
+        return findings
+
+    @staticmethod
+    def _check_build_config(pyproject_path: Path, package_name: str) -> list[ArtifactBoundaryFinding]:
+        findings = []
+        pp_name = pyproject_path.name
+        if not pyproject_path.is_file():
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="missing_control",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason="No pyproject.toml found — packaging rules unknown",
+                )
+            )
+            return findings
+        data, err = ArtifactBoundaryGuard._try_load_toml(pyproject_path, pp_name)
+        if err:
+            return err
+        wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+        findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
         return findings
 
     def verify_package_boundary(
@@ -263,7 +271,7 @@ class ArtifactBoundaryGuard:
         blocked = [f for f in result.findings if f.severity == "BLOCK"]
 
         if result.is_safe:
-            trace = build_trace(ARTIFACT_MISSING_CONTROL, "ALLOWED")
+            trace = build_trace(ARTIFACT_BOUNDARY_VERIFIED, "ALLOWED")
             return InfraDiagnosticResult.verified(
                 agent_message="Package boundary verified — safe to publish",
                 developer_fields={
@@ -273,7 +281,7 @@ class ArtifactBoundaryGuard:
                     "findings": [f.model_dump() for f in result.findings],
                     "reason": result.reason,
                     "audit_trace": trace,
-                    "rule_ids": [ARTIFACT_MISSING_CONTROL.rule_id],
+                    "rule_ids": [ARTIFACT_BOUNDARY_VERIFIED.rule_id],
                 },
                 evidence={**trace, "file_count": len(result.package_files)},
             )

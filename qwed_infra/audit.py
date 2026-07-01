@@ -109,6 +109,10 @@ ARTIFACT_MISSING_CONTROL = RuleRef(
     "ARTIFACT_MISSING_CONTROL",
     "Artifact boundary — missing package boundary controls",
 )
+ARTIFACT_BOUNDARY_VERIFIED = RuleRef(
+    "ARTIFACT_BOUNDARY_VERIFIED",
+    "Artifact boundary — package safe to publish",
+)
 
 
 def build_trace(
@@ -163,4 +167,5 @@ __all__ = [
     "ARTIFACT_DEBUG_INCLUSION",
     "ARTIFACT_UNKNOWN_BOUNDARY",
     "ARTIFACT_MISSING_CONTROL",
+    "ARTIFACT_BOUNDARY_VERIFIED",
 ]
