@@ -142,11 +142,15 @@ print(diagnostic.status.value)  # -> VERIFIED / BLOCKED / UNVERIFIABLE
 from qwed_infra import CostGuard
 
 cost = CostGuard()
-resources = [{"type": "p4d.24xlarge", "count": 2}] # Expensive!
+resources = {
+    "instances": [
+        {"id": "gpu", "instance_type": "p4d.24xlarge", "count": 2}
+    ]
+}
 
 result = cost.verify_budget(resources, budget_monthly=1000)
 print(result.within_budget) # -> False
-print(result.reason) # -> "Est. $46,000 > Budget $1,000"
+print(result.reason) # -> "Estimated cost $47844.20 EXCEEDS budget $1000.00"
 ```
 
 ---
