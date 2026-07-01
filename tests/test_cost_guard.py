@@ -233,3 +233,76 @@ def test_float_drift_at_boundary(guard):
     assert result.within_budget is True
     result_below = guard.verify_budget(resources, budget_monthly="7.58")
     assert result_below.within_budget is False
+
+
+def test_invalid_count_non_int(guard):
+    resources = {
+        "instances": [
+            {"id": "bad", "instance_type": "t3.micro", "count": "two"}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "invalid-count-bad" in result.breakdown
+    assert "invalid count" in result.reason
+
+
+def test_invalid_count_negative(guard):
+    resources = {
+        "instances": [
+            {"id": "bad", "instance_type": "t3.micro", "count": -1}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "invalid-count-bad" in result.breakdown
+
+
+def test_invalid_size_gb_non_int(guard):
+    resources = {
+        "volumes": [
+            {"id": "bad", "volume_type": "gp2", "size_gb": "large"}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "invalid-size-bad" in result.breakdown
+    assert "invalid size_gb" in result.reason
+
+
+def test_invalid_size_gb_negative(guard):
+    resources = {
+        "volumes": [
+            {"id": "bad", "volume_type": "gp2", "size_gb": -5}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "invalid-size-bad" in result.breakdown
+
+
+def test_missing_size_gb_fails_closed(guard):
+    resources = {
+        "volumes": [
+            {"id": "no-size", "volume_type": "gp2"}
+        ]
+    }
+    result = guard.verify_budget(resources, budget_monthly=100.0)
+    assert result.has_unknown_types is True
+    assert "invalid-size-no-size" in result.breakdown
+
+
+def test_to_diagnostic_malformed_total(guard):
+    result = guard.verify_budget({"volumes": []}, budget_monthly=100.0)
+    result.total_monthly_cost = "not-a-number"
+    diagnostic = CostGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "BLOCKED"
+    assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INVALID_INPUT"
+
+
+def test_to_diagnostic_malformed_budget(guard):
+    result = guard.verify_budget({"volumes": []}, budget_monthly=100.0)
+    result.budget = "bad-budget"
+    diagnostic = CostGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "BLOCKED"
+    assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INVALID_INPUT"
