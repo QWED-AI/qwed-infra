@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from qwed_infra.audit import (
     ARTIFACT_BOUNDARY_VERIFIED,
     ARTIFACT_DEBUG_INCLUSION,
+    ARTIFACT_DISCLOSURE_RISK,
     ARTIFACT_MISSING_CONTROL,
     ARTIFACT_SECRET_LEAK,
     ARTIFACT_UNKNOWN_BOUNDARY,
@@ -312,7 +313,7 @@ class ArtifactBoundaryGuard:
             elif name in FORBIDDEN_NAMES:
                 findings.append(
                     ArtifactBoundaryFinding(
-                        finding_type="secret_leak",
+                        finding_type="disclosure_risk",
                         severity="BLOCK",
                         file_path=rel,
                         reason=f"'{name}' found in package boundary — should not be shipped",
@@ -349,6 +350,7 @@ class ArtifactBoundaryGuard:
     def _get_rule_ref_for_finding(finding_type: str):
         mapping = {
             "secret_leak": ARTIFACT_SECRET_LEAK,
+            "disclosure_risk": ARTIFACT_DISCLOSURE_RISK,
             "unknown_boundary": ARTIFACT_UNKNOWN_BOUNDARY,
             "debug_inclusion": ARTIFACT_DEBUG_INCLUSION,
             "missing_control": ARTIFACT_MISSING_CONTROL,
@@ -357,7 +359,7 @@ class ArtifactBoundaryGuard:
 
     @staticmethod
     def _finding_priority(finding_type: str) -> int:
-        order = ["secret_leak", "unknown_boundary", "debug_inclusion", "missing_control"]
+        order = ["secret_leak", "disclosure_risk", "unknown_boundary", "debug_inclusion", "missing_control"]
         return order.index(finding_type) if finding_type in order else len(order)
 
     @staticmethod

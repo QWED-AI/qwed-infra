@@ -113,6 +113,10 @@ ARTIFACT_BOUNDARY_VERIFIED = RuleRef(
     "ARTIFACT_BOUNDARY_VERIFIED",
     "Artifact boundary — package safe to publish",
 )
+ARTIFACT_DISCLOSURE_RISK = RuleRef(
+    "ARTIFACT_DISCLOSURE_RISK",
+    "Artifact boundary — project structure disclosure (e.g. .gitignore, .dockerignore)",
+)
 
 
 def build_trace(
@@ -168,4 +172,5 @@ __all__ = [
     "ARTIFACT_UNKNOWN_BOUNDARY",
     "ARTIFACT_MISSING_CONTROL",
     "ARTIFACT_BOUNDARY_VERIFIED",
+    "ARTIFACT_DISCLOSURE_RISK",
 ]
