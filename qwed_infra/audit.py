@@ -92,6 +92,32 @@ COST_WITHIN_BUDGET = RuleRef(
     "AWS Pricing + Budget Policy (within budget)",
 )
 
+# Artifact Boundary Guard
+ARTIFACT_SECRET_LEAK = RuleRef(
+    "ARTIFACT_SECRET_LEAK",
+    "Artifact boundary — secret or credentials in release surface",
+)
+ARTIFACT_DEBUG_INCLUSION = RuleRef(
+    "ARTIFACT_DEBUG_INCLUSION",
+    "Artifact boundary — debug or test artifact in release surface",
+)
+ARTIFACT_UNKNOWN_BOUNDARY = RuleRef(
+    "ARTIFACT_UNKNOWN_BOUNDARY",
+    "Artifact boundary — uninspectable release surface",
+)
+ARTIFACT_MISSING_CONTROL = RuleRef(
+    "ARTIFACT_MISSING_CONTROL",
+    "Artifact boundary — missing package boundary controls",
+)
+ARTIFACT_BOUNDARY_VERIFIED = RuleRef(
+    "ARTIFACT_BOUNDARY_VERIFIED",
+    "Artifact boundary — package safe to publish",
+)
+ARTIFACT_DISCLOSURE_RISK = RuleRef(
+    "ARTIFACT_DISCLOSURE_RISK",
+    "Artifact boundary — project structure disclosure (e.g. .gitignore, .dockerignore)",
+)
+
 
 def build_trace(
     rule: RuleRef,
@@ -141,4 +167,10 @@ __all__ = [
     "COST_BUDGET_EXCEEDED",
     "COST_UNKNOWN_RESOURCE",
     "COST_WITHIN_BUDGET",
+    "ARTIFACT_SECRET_LEAK",
+    "ARTIFACT_DEBUG_INCLUSION",
+    "ARTIFACT_UNKNOWN_BOUNDARY",
+    "ARTIFACT_MISSING_CONTROL",
+    "ARTIFACT_BOUNDARY_VERIFIED",
+    "ARTIFACT_DISCLOSURE_RISK",
 ]

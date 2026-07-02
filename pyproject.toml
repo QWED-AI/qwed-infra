@@ -13,6 +13,7 @@ dependencies = [
     "networkx>=3.0",
     "pydantic>=2.0.0",
     "python-hcl2>=4.3.0",  # For parsing Terraform
+    "tomli>=2.0.0; python_version < '3.11'",  # For pyproject.toml parsing
 ]
 
 [project.optional-dependencies]
