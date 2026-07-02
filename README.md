@@ -174,14 +174,14 @@ print(result.reason) # -> "Estimated cost $47844.20 EXCEEDS budget $1000.00"
 from qwed_infra import ArtifactBoundaryGuard
 
 guard = ArtifactBoundaryGuard()
-result = guard.verify_package_boundary(pkg_path=".")
+result = guard.verify_package_boundary(package_dir=".")
 
 # Convert to structured diagnostic for CI/CD enforcement
 diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
 
 if diagnostic.status.value == "BLOCKED":
-    for finding in diagnostic.findings:
-        print(f"❌ {finding.rule_id}: {finding.message}")
+    for finding in diagnostic.developer_fields["findings"]:
+        print(f"❌ {finding['finding_type']}: {finding['reason']}")
 else:
     print("✅ Package boundary verified — safe to ship.")
 ```
@@ -249,10 +249,10 @@ When you see the **Verified by QWED** badge on a repository, it is a technical g
 If you use qwed-infra in your research or project:
 
 ```bibtex
-@software{dass2025qwedinfra,
+@software{dass2026qwedinfra,
   author = {Dass, Rahul},
   title = {QWED-Infra: Deterministic Verification for Infrastructure as Code},
-  year = {2025},
+  year = {2026},
   publisher = {GitHub},
   url = {https://github.com/QWED-AI/qwed-infra}
 }
