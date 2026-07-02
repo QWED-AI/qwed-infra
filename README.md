@@ -174,7 +174,7 @@ print(result.reason) # -> "Estimated cost $47844.20 EXCEEDS budget $1000.00"
 from qwed_infra import ArtifactBoundaryGuard
 
 guard = ArtifactBoundaryGuard()
-result = guard.verify_package_boundary(package_dir=".")
+result = guard.verify_package_boundary(package_dir="qwed_infra")
 
 # Convert to structured diagnostic for CI/CD enforcement
 diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
