@@ -111,19 +111,8 @@ class ArtifactBoundaryGuard:
             ]
 
     @staticmethod
-    def _check_wheel_config(wheel, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+    def _check_wheel_packages(packages, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
         findings = []
-        if not isinstance(wheel, dict):
-            findings.append(
-                ArtifactBoundaryFinding(
-                    finding_type="unknown_boundary",
-                    severity="BLOCK",
-                    file_path=pp_name,
-                    reason="Invalid [tool.hatch.build.targets.wheel] shape — packaging rules unverifiable",
-                )
-            )
-            return findings
-        packages = wheel.get("packages", [])
         if not isinstance(packages, list) or not all(isinstance(p, str) for p in packages):
             findings.append(
                 ArtifactBoundaryFinding(
@@ -133,7 +122,7 @@ class ArtifactBoundaryGuard:
                     reason="Invalid wheel packages control — packaging boundary unknown",
                 )
             )
-            return findings
+            return findings, False
         if not packages:
             findings.append(
                 ArtifactBoundaryFinding(
@@ -143,28 +132,33 @@ class ArtifactBoundaryGuard:
                     reason="No explicit packages in [tool.hatch.build.targets.wheel] — packaging boundary unknown",
                 )
             )
-        else:
-            for pkg in packages:
-                if pkg != package_name and not pkg.startswith(f"{package_name}/"):
-                    findings.append(
-                        ArtifactBoundaryFinding(
-                            finding_type="missing_control",
-                            severity="BLOCK",
-                            file_path=pp_name,
-                            reason=f"Package '{pkg}' in wheel packages is outside verified boundary '{package_name}'",
-                        )
-                    )
-                    break
-            if package_name not in packages and not any(p.startswith(f"{package_name}/") for p in packages):
+            return findings, False
+        for pkg in packages:
+            if pkg != package_name and not pkg.startswith(f"{package_name}/"):
                 findings.append(
                     ArtifactBoundaryFinding(
                         finding_type="missing_control",
                         severity="BLOCK",
                         file_path=pp_name,
-                        reason=f"Package '{package_name}' not listed in [tool.hatch.build.targets.wheel].packages",
+                        reason=f"Package '{pkg}' in wheel packages is outside verified boundary '{package_name}'",
                     )
                 )
-        only_include = wheel.get("only-include", [])
+                return findings, False
+        if package_name not in packages and not any(p.startswith(f"{package_name}/") for p in packages):
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="missing_control",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason=f"Package '{package_name}' not listed in [tool.hatch.build.targets.wheel].packages",
+                )
+            )
+            return findings, False
+        return findings, True
+
+    @staticmethod
+    def _check_wheel_only_include(only_include, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+        findings = []
         if not isinstance(only_include, list) or not all(isinstance(e, str) for e in only_include):
             findings.append(
                 ArtifactBoundaryFinding(
@@ -195,6 +189,19 @@ class ArtifactBoundaryGuard:
                         )
                     )
                     break
+        return findings
+
+    @staticmethod
+    def _check_wheel_config(wheel, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+        findings = []
+        pkg_findings, ok = ArtifactBoundaryGuard._check_wheel_packages(
+            wheel.get("packages", []), package_name, pp_name
+        )
+        if not ok:
+            return pkg_findings
+        findings.extend(pkg_findings)
+        only_include = wheel.get("only-include", [])
+        findings.extend(ArtifactBoundaryGuard._check_wheel_only_include(only_include, package_name, pp_name))
         if not wheel.get("only-packages", False):
             widening = [opt for opt in ("include", "artifacts", "force-include") if wheel.get(opt)]
             if widening:
@@ -227,6 +234,8 @@ class ArtifactBoundaryGuard:
             return err
         backend = data.get("build-system", {}).get("build-backend", "")
         wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+        if backend and not backend.startswith("hatchling"):
+            return findings
         if not isinstance(wheel, dict):
             findings.append(
                 ArtifactBoundaryFinding(
@@ -237,12 +246,9 @@ class ArtifactBoundaryGuard:
                 )
             )
             return findings
-        if wheel:
-            findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
-        elif not backend or not backend.startswith("hatchling"):
+        if not wheel:
             return findings
-        else:
-            findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
+        findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
         return findings
 
     def verify_package_boundary(
