@@ -135,7 +135,7 @@ class ArtifactBoundaryGuard:
             )
             return findings, False
         for pkg in packages:
-            if pkg != package_name and not pkg.startswith(f"{package_name}/"):
+            if package_name not in Path(pkg).parts:
                 findings.append(
                     ArtifactBoundaryFinding(
                         finding_type="missing_control",
@@ -145,7 +145,7 @@ class ArtifactBoundaryGuard:
                     )
                 )
                 return findings, False
-        if package_name not in packages and not any(p.startswith(f"{package_name}/") for p in packages):
+        if not any(package_name in Path(p).parts for p in packages):
             findings.append(
                 ArtifactBoundaryFinding(
                     finding_type="missing_control",
@@ -301,15 +301,6 @@ class ArtifactBoundaryGuard:
                         reason=f"Forbidden directory '{forbidden_part}' found in package boundary",
                     )
                 )
-            elif self._matches_any(f, SENSITIVE_FILE_PATTERNS):
-                findings.append(
-                    ArtifactBoundaryFinding(
-                        finding_type="secret_leak",
-                        severity="BLOCK",
-                        file_path=rel,
-                        reason=f"Sensitive file pattern '{name}' found in package boundary",
-                    )
-                )
             elif name in FORBIDDEN_NAMES:
                 findings.append(
                     ArtifactBoundaryFinding(
@@ -317,6 +308,15 @@ class ArtifactBoundaryGuard:
                         severity="BLOCK",
                         file_path=rel,
                         reason=f"'{name}' found in package boundary — should not be shipped",
+                    )
+                )
+            elif self._matches_any(f, SENSITIVE_FILE_PATTERNS):
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="secret_leak",
+                        severity="BLOCK",
+                        file_path=rel,
+                        reason=f"Sensitive file pattern '{name}' found in package boundary",
                     )
                 )
             elif self._matches_any(f, DEBUG_FILE_PATTERNS):

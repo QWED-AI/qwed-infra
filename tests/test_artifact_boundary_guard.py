@@ -62,7 +62,7 @@ def test_detects_env_file(guard, tmp_path):
     _write_file(pkg / ".env", "API_KEY=abc123")
     result = guard.verify_package_boundary(package_dir=str(pkg))
     assert result.is_safe is False
-    assert any(f.finding_type == "secret_leak" for f in result.findings)
+    assert any(f.finding_type == "disclosure_risk" for f in result.findings)
 
 
 def test_detects_credential_file(guard, tmp_path):
