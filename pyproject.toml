@@ -1,6 +1,6 @@
 [project]
 name = "qwed-infra"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic Verification for Infrastructure as Code (IaC) using Z3 and Graph Theory."
 authors = [
     {name = "QWED Team", email = "rahul@qwedai.com"},

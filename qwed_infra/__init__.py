@@ -1,4 +1,4 @@
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .guards.iam_guard import IamGuard
 from .guards.network_guard import NetworkGuard
