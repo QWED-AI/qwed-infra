@@ -20,7 +20,7 @@ def _write_file(path: Path, content: str = ""):
 def test_verify_real_package_returns_results(guard):
     result = guard.verify_package_boundary()
     assert len(result.package_files) > 0
-    assert len(result.findings) >= 0
+    assert isinstance(result.findings, list)
 
 
 def test_to_diagnostic_verified(guard, tmp_path):

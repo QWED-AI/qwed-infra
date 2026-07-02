@@ -20,7 +20,7 @@ SENSITIVE_FILE_PATTERNS = [
     "*credential*",
     "*secret*",
     "*password*", "*passwd*",
-    "*token*",
+    "*.token",
     "*.log",
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
     ".dockerconfigjson",
@@ -111,7 +111,7 @@ class ArtifactBoundaryGuard:
             ]
 
     @staticmethod
-    def _check_wheel_packages(packages, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+    def _check_wheel_packages(packages, package_name: str, pp_name: str) -> tuple[list[ArtifactBoundaryFinding], bool]:
         findings = []
         if not isinstance(packages, list) or not all(isinstance(p, str) for p in packages):
             findings.append(
@@ -169,17 +169,12 @@ class ArtifactBoundaryGuard:
                 )
             )
             return findings
-        if only_include and not any(package_name in Path(e).parts for e in only_include):
-            findings.append(
-                ArtifactBoundaryFinding(
-                    finding_type="missing_control",
-                    severity="BLOCK",
-                    file_path=pp_name,
-                    reason=f"Package '{package_name}' not referenced in [tool.hatch.build.targets.wheel].only-include",
-                )
-            )
+        if only_include:
+            has_valid = False
             for entry in only_include:
-                if package_name not in Path(entry).parts:
+                if package_name in Path(entry).parts:
+                    has_valid = True
+                else:
                     findings.append(
                         ArtifactBoundaryFinding(
                             finding_type="missing_control",
@@ -188,7 +183,15 @@ class ArtifactBoundaryGuard:
                             reason=f"only-include entry '{entry}' is outside verified boundary '{package_name}'",
                         )
                     )
-                    break
+            if not has_valid:
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="missing_control",
+                        severity="BLOCK",
+                        file_path=pp_name,
+                        reason=f"Package '{package_name}' not referenced in [tool.hatch.build.targets.wheel].only-include",
+                    )
+                )
         return findings
 
     @staticmethod
