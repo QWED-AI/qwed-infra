@@ -488,7 +488,7 @@ def _has_valid_proof(proof: Mapping[str, Any]) -> bool:
     if not isinstance(deps, list):
         return False
     for dep in deps:
-        if not isinstance(dep, str):
+        if not isinstance(dep, str) or not dep.strip():
             return False
     return True
 

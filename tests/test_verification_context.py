@@ -121,12 +121,14 @@ class TestEvidence:
         assert d == {"payload": {"test": True}, "proof_ref": None}
 
     def test_non_dict_payload_rejected(self):
+        bad_payload = "not-a-dict"
         with pytest.raises(VerificationContextValidationError):
-            Evidence(payload="not-a-dict", proof_ref=None)
+            Evidence(payload=bad_payload, proof_ref=None)
 
     def test_invalid_proof_ref_format_rejected(self):
+        bad_ref = "not-sha256"
         with pytest.raises(VerificationContextValidationError):
-            Evidence(payload={"test": True}, proof_ref="not-sha256")
+            Evidence(payload={"test": True}, proof_ref=bad_ref)
 
 
 class TestDecision:
@@ -139,8 +141,9 @@ class TestDecision:
         assert d.to_dict() == {"admission": "DENY"}
 
     def test_non_admission_rejected(self):
+        bad_admission = "not-admission"
         with pytest.raises(VerificationContextValidationError):
-            Decision(admission="not-admission")
+            Decision(admission=bad_admission)
 
 
 class TestVerificationContext:
