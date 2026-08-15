@@ -479,10 +479,41 @@ def _has_valid_context(document: Mapping[str, Any]) -> bool:
     return True
 
 
+def _is_safe_string(value: Any) -> bool:
+    """Check value is a non-empty, surrogate-free canonical string."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        _reject_unpaired_surrogates(value)
+        return True
+    except VerificationContextValidationError:
+        return False
+
+
 def _has_valid_interpretation(interp: Mapping[str, Any]) -> bool:
     for field in ("theory", "logic"):
-        val = interp.get(field)
-        if not isinstance(val, str) or not val.strip():
+        if not _is_safe_string(interp.get(field)):
+            return False
+    return True
+
+
+def _is_serializable_string(value: str) -> bool:
+    try:
+        _reject_unpaired_surrogates(value)
+        return True
+    except VerificationContextValidationError:
+        return False
+
+
+def _is_serializable_sequence(value) -> bool:
+    return all(_is_serializable(item) for item in value)
+
+
+def _is_serializable_mapping(value: Mapping) -> bool:
+    for key, item in value.items():
+        if not isinstance(key, str) or not _is_serializable_string(key):
+            return False
+        if not _is_serializable(item):
             return False
     return True
 
@@ -496,31 +527,17 @@ def _is_serializable(value: Any) -> bool:
     if isinstance(value, float):
         return math.isfinite(value)
     if isinstance(value, str):
-        try:
-            _reject_unpaired_surrogates(value)
-            return True
-        except VerificationContextValidationError:
-            return False
+        return _is_serializable_string(value)
     if isinstance(value, (list, tuple)):
-        return all(_is_serializable(item) for item in value)
+        return _is_serializable_sequence(value)
     if isinstance(value, Mapping):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                return False
-            try:
-                _reject_unpaired_surrogates(key)
-            except VerificationContextValidationError:
-                return False
-            if not _is_serializable(item):
-                return False
-        return True
+        return _is_serializable_mapping(value)
     return False
 
 
 def _has_valid_proof(proof: Mapping[str, Any]) -> bool:
     for field in ("verifier", "verifier_version", "theory_scope", "outcome_treatment"):
-        val = proof.get(field)
-        if not isinstance(val, str) or not val.strip():
+        if not _is_safe_string(proof.get(field)):
             return False
     config = proof.get("configuration")
     if not isinstance(config, Mapping) or not _is_serializable(config):
@@ -529,7 +546,7 @@ def _has_valid_proof(proof: Mapping[str, Any]) -> bool:
     if not isinstance(deps, list):
         return False
     for dep in deps:
-        if not isinstance(dep, str) or not dep.strip():
+        if not _is_safe_string(dep):
             return False
     return True
 

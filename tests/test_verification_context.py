@@ -435,6 +435,21 @@ class TestIsValidDocument:
         doc["object"]["formalization"] = {"source_query": object(), "translator": "Test"}
         assert is_valid_document(doc) is False
 
+    def test_surrogate_in_theory_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["interpretation"]["theory"] = "bad\ud800"
+        assert is_valid_document(doc) is False
+
+    def test_surrogate_in_proof_verifier_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["proof"]["verifier"] = "bad\ud800"
+        assert is_valid_document(doc) is False
+
+    def test_surrogate_in_trusted_dependency_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["proof"]["trusted_dependencies"] = ["bad\ud800"]
+        assert is_valid_document(doc) is False
+
 
 class TestConstructorRejectsUnsupportedLeaves:
     def test_proof_rejects_set(self):
