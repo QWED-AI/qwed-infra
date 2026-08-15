@@ -128,7 +128,7 @@ class Proof:
             raise VerificationContextValidationError(
                 "Proof.configuration must be a dict"
             )
-        object.__setattr__(self, 'configuration', copy.deepcopy(self.configuration))
+        object.__setattr__(self, 'configuration', _freeze_value(copy.deepcopy(self.configuration)))
         if not isinstance(self.trusted_dependencies, tuple):
             raise VerificationContextValidationError(
                 "Proof.trusted_dependencies must be a tuple of strings"
@@ -143,7 +143,7 @@ class Proof:
         return {
             "verifier": self.verifier,
             "verifier_version": self.verifier_version,
-            "configuration": copy.deepcopy(self.configuration),
+            "configuration": _thaw_value(self.configuration),
             "theory_scope": self.theory_scope,
             "trusted_dependencies": list(self.trusted_dependencies),
             "outcome_treatment": self.outcome_treatment,
@@ -160,9 +160,7 @@ class Evidence:
             raise VerificationContextValidationError(
                 "Evidence.payload must be a dict"
             )
-        # Deep-copy the payload to prevent post-construction caller mutation from
-        # affecting the proof-bound document (aliases break proof_ref resolution).
-        object.__setattr__(self, 'payload', copy.deepcopy(self.payload))
+        object.__setattr__(self, 'payload', _freeze_value(copy.deepcopy(self.payload)))
         if self.proof_ref is not None:
             if not isinstance(self.proof_ref, str) or not _PROOF_REF_PATTERN.fullmatch(self.proof_ref):
                 raise VerificationContextValidationError(
@@ -171,7 +169,7 @@ class Evidence:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "payload": copy.deepcopy(self.payload),
+            "payload": _thaw_value(self.payload),
             "proof_ref": self.proof_ref,
         }
 
@@ -382,6 +380,8 @@ def compute_document_proof_ref(document: Mapping[str, Any]) -> str:
         if key != "proof_ref"
     }
     bound = {
+        "spec_version": document["spec_version"],
+        "verdict": document["verdict"],
         "object": object_dict,
         "context": {**context_dict, "evidence": evidence_dict},
     }
@@ -517,14 +517,14 @@ class VerificationContextDocument:
     formalization: Optional[Formalization] = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, 'object', copy.deepcopy(self.object))
-        if self.spec_version != SPEC_VERSION:
-            raise VerificationContextValidationError(
-                f"spec_version must be {SPEC_VERSION}"
-            )
         if not isinstance(self.object, dict):
             raise VerificationContextValidationError(
                 "object must be a dict with formal_statement"
+            )
+        object.__setattr__(self, 'object', _freeze_value(copy.deepcopy(self.object)))
+        if self.spec_version != SPEC_VERSION:
+            raise VerificationContextValidationError(
+                f"spec_version must be {SPEC_VERSION}"
             )
         formal_statement = self.object.get("formal_statement")
         if not isinstance(formal_statement, str) or not formal_statement.strip():
@@ -553,7 +553,7 @@ class VerificationContextDocument:
             )
 
     def to_dict(self) -> Dict[str, Any]:
-        object_dict = copy.deepcopy(self.object)
+        object_dict = _thaw_value(self.object)
         if self.formalization is not None:
             object_dict["formalization"] = self.formalization.to_dict()
         doc = {
