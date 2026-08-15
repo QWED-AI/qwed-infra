@@ -425,6 +425,49 @@ class TestIsValidDocument:
         doc["context"]["evidence"]["payload"] = {"bad": object()}
         assert is_valid_document(doc) is False
 
+    def test_unserializable_object_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["object"]["formal_statement"] = {"bad": object()}
+        assert is_valid_document(doc) is False
+
+    def test_unserializable_formalization_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["object"]["formalization"] = {"source_query": object(), "translator": "Test"}
+        assert is_valid_document(doc) is False
+
+
+class TestConstructorRejectsUnsupportedLeaves:
+    def test_proof_rejects_set(self):
+        with pytest.raises(VerificationContextValidationError):
+            Proof(
+                verifier="Test", verifier_version="1.0",
+                configuration={"mode": {"a", "b"}},
+                theory_scope="test", trusted_dependencies=(),
+                outcome_treatment="fail-closed",
+            )
+
+    def test_evidence_rejects_bytearray(self):
+        with pytest.raises(VerificationContextValidationError):
+            Evidence(payload={"data": bytearray(b"x")}, proof_ref=None)
+
+    def test_document_rejects_object_leaf(self):
+        with pytest.raises(VerificationContextValidationError):
+            VerificationContextDocument(
+                spec_version="1.0",
+                object={"formal_statement": "test", "extra": object()},
+                context=VerificationContext(
+                    interpretation=Interpretation(theory="Test"),
+                    proof=Proof(
+                        verifier="Test", verifier_version="1.0",
+                        configuration={}, theory_scope="test",
+                        trusted_dependencies=(), outcome_treatment="fail-closed",
+                    ),
+                    evidence=Evidence(payload={"test": True}, proof_ref=None),
+                    decision=Decision(admission=Admission.DENY),
+                ),
+                verdict=Verdict.BLOCKED,
+            )
+
 
 # =============================================================================
 # Canonical JSON tests (RFC 8785)

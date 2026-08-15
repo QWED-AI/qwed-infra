@@ -128,6 +128,10 @@ class Proof:
             raise VerificationContextValidationError(
                 "Proof.configuration must be a dict"
             )
+        if not _is_serializable(self.configuration):
+            raise VerificationContextValidationError(
+                "Proof.configuration contains unsupported non-canonical values"
+            )
         object.__setattr__(self, 'configuration', _freeze_value(copy.deepcopy(self.configuration)))
         if not isinstance(self.trusted_dependencies, tuple):
             raise VerificationContextValidationError(
@@ -159,6 +163,10 @@ class Evidence:
         if not isinstance(self.payload, dict):
             raise VerificationContextValidationError(
                 "Evidence.payload must be a dict"
+            )
+        if not _is_serializable(self.payload):
+            raise VerificationContextValidationError(
+                "Evidence.payload contains unsupported non-canonical values"
             )
         object.__setattr__(self, 'payload', _freeze_value(copy.deepcopy(self.payload)))
         if self.proof_ref is not None:
@@ -440,6 +448,8 @@ def _has_valid_object(document: Mapping[str, Any]) -> bool:
     obj = document.get("object")
     if not isinstance(obj, Mapping):
         return False
+    if not _is_serializable(obj):
+        return False
     if not isinstance(obj.get("formal_statement"), str) or not obj.get("formal_statement", "").strip():
         return False
     formalization = obj.get("formalization")
@@ -545,6 +555,10 @@ class VerificationContextDocument:
         if not isinstance(self.object, dict):
             raise VerificationContextValidationError(
                 "object must be a dict with formal_statement"
+            )
+        if not _is_serializable(self.object):
+            raise VerificationContextValidationError(
+                "object contains unsupported non-canonical values"
             )
         object.__setattr__(self, 'object', _freeze_value(copy.deepcopy(self.object)))
         if self.spec_version != SPEC_VERSION:
