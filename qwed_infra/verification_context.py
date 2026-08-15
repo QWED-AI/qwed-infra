@@ -505,7 +505,13 @@ def _is_serializable(value: Any) -> bool:
         return all(_is_serializable(item) for item in value)
     if isinstance(value, Mapping):
         for key, item in value.items():
-            if not isinstance(key, str) or not _is_serializable(item):
+            if not isinstance(key, str):
+                return False
+            try:
+                _reject_unpaired_surrogates(key)
+            except VerificationContextValidationError:
+                return False
+            if not _is_serializable(item):
                 return False
         return True
     return False

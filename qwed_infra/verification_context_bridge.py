@@ -89,13 +89,19 @@ def _normalize_developer_fields(result):
 
 
 def _apply_attestation_policy(result, attestation_token):
-    """Demote VERIFIED to UNVERIFIABLE when attestation token is missing."""
+    """Demote VERIFIED to UNVERIFIABLE when attestation token is missing.
+
+    Returns (decision_result, evidence_result). The evidence result retains the
+    original diagnostic fields (including proof_ref) so the audit trail is
+    preserved even when the verdict is demoted.
+    """
     if result.status is InfraDiagnosticStatus.VERIFIED and attestation_token is None:
-        return InfraDiagnosticResult.unverifiable(
+        decision_result = InfraDiagnosticResult.unverifiable(
             agent_message=result.agent_message,
             developer_fields=result.developer_fields,
         )
-    return result
+        return decision_result, result
+    return result, result
 
 
 def _build_evidence_payload(result):
@@ -146,7 +152,7 @@ def verification_context_from_diagnostic_result(
 
     result = _normalize_status(result)
     result = _normalize_developer_fields(result)
-    result = _apply_attestation_policy(result, attestation_token)
+    decision_result, evidence_result = _apply_attestation_policy(result, attestation_token)
 
     interpretation = Interpretation(theory=f"{verifier} verification")
     proof = Proof(
@@ -162,9 +168,9 @@ def verification_context_from_diagnostic_result(
         translator=verifier,
     )
 
-    evidence_payload = _build_evidence_payload(result)
+    evidence_payload = _build_evidence_payload(evidence_result)
 
-    if result.status is InfraDiagnosticStatus.VERIFIED:
+    if decision_result.status is InfraDiagnosticStatus.VERIFIED:
         decision = Decision(admission=Admission.ADMIT)
         proof_ref = _compute_verified_proof_ref(
             formal_statement, interpretation, proof, evidence_payload, decision, formalization
@@ -184,6 +190,6 @@ def verification_context_from_diagnostic_result(
         spec_version=SPEC_VERSION,
         object={"formal_statement": formal_statement},
         context=context,
-        verdict=_VERDICT_MAP[result.status],
+        verdict=_VERDICT_MAP[decision_result.status],
         formalization=formalization,
     )

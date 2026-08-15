@@ -451,20 +451,21 @@ class TestConstructorRejectsUnsupportedLeaves:
             Evidence(payload={"data": bytearray(b"x")}, proof_ref=None)
 
     def test_document_rejects_object_leaf(self):
+        context = VerificationContext(
+            interpretation=Interpretation(theory="Test"),
+            proof=Proof(
+                verifier="Test", verifier_version="1.0",
+                configuration={}, theory_scope="test",
+                trusted_dependencies=(), outcome_treatment="fail-closed",
+            ),
+            evidence=Evidence(payload={"test": True}, proof_ref=None),
+            decision=Decision(admission=Admission.DENY),
+        )
         with pytest.raises(VerificationContextValidationError):
             VerificationContextDocument(
                 spec_version="1.0",
                 object={"formal_statement": "test", "extra": object()},
-                context=VerificationContext(
-                    interpretation=Interpretation(theory="Test"),
-                    proof=Proof(
-                        verifier="Test", verifier_version="1.0",
-                        configuration={}, theory_scope="test",
-                        trusted_dependencies=(), outcome_treatment="fail-closed",
-                    ),
-                    evidence=Evidence(payload={"test": True}, proof_ref=None),
-                    decision=Decision(admission=Admission.DENY),
-                ),
+                context=context,
                 verdict=Verdict.BLOCKED,
             )
 
@@ -783,6 +784,26 @@ class TestBridge:
         )
         assert "developer_fields" in vc.context.evidence.payload
         assert "audit_trace" in vc.context.evidence.payload["developer_fields"]
+
+    def test_demoted_verified_preserves_diagnostic_proof_ref(self):
+        # VERIFIED without attestation → demoted to UNVERIFIABLE, but the
+        # original diagnostic proof_ref must be preserved in the evidence trail.
+        result = InfraDiagnosticResult.verified(
+            agent_message="verified diagnostic",
+            developer_fields={"test": 1, "audit_trace": {"rule": "x"}},
+            evidence={"test": 1},
+        )
+        vc = verification_context_from_diagnostic_result(
+            result,
+            formal_statement="test",
+            verifier="IamGuard",
+        )
+        assert vc.verdict == Verdict.UNVERIFIABLE
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        # audit trail preserved: diagnostic_proof_ref in payload
+        assert "diagnostic_proof_ref" in vc.context.evidence.payload
+        assert vc.context.evidence.payload["diagnostic_proof_ref"] == result.proof_ref
 
 
 class TestBridgeEdgeCases:
