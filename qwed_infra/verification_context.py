@@ -134,9 +134,9 @@ class Proof:
                 "Proof.trusted_dependencies must be a tuple of strings"
             )
         for dep in self.trusted_dependencies:
-            if not isinstance(dep, str):
+            if not isinstance(dep, str) or not dep.strip():
                 raise VerificationContextValidationError(
-                    "Proof.trusted_dependencies must contain only strings"
+                    "Proof.trusted_dependencies must contain only non-empty strings"
                 )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -477,12 +477,37 @@ def _has_valid_interpretation(interp: Mapping[str, Any]) -> bool:
     return True
 
 
+def _is_serializable(value: Any) -> bool:
+    """Recursively check value is representable by _canonical_json (RFC 8785)."""
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return _is_safe_integer(value)
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, str):
+        try:
+            _reject_unpaired_surrogates(value)
+            return True
+        except VerificationContextValidationError:
+            return False
+    if isinstance(value, (list, tuple)):
+        return all(_is_serializable(item) for item in value)
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str) or not _is_serializable(item):
+                return False
+        return True
+    return False
+
+
 def _has_valid_proof(proof: Mapping[str, Any]) -> bool:
     for field in ("verifier", "verifier_version", "theory_scope", "outcome_treatment"):
         val = proof.get(field)
         if not isinstance(val, str) or not val.strip():
             return False
-    if not isinstance(proof.get("configuration"), Mapping):
+    config = proof.get("configuration")
+    if not isinstance(config, Mapping) or not _is_serializable(config):
         return False
     deps = proof.get("trusted_dependencies")
     if not isinstance(deps, list):
@@ -495,7 +520,7 @@ def _has_valid_proof(proof: Mapping[str, Any]) -> bool:
 
 def _has_valid_evidence(evidence: Mapping[str, Any]) -> bool:
     payload = evidence.get("payload")
-    if not isinstance(payload, dict) or payload is None:
+    if not isinstance(payload, dict) or not _is_serializable(payload):
         return False
     return True
 

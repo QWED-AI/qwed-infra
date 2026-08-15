@@ -169,8 +169,9 @@ class TestVerificationContext:
         assert ctx.decision.admission == Admission.DENY
 
     def test_deny_with_proof_ref_rejected(self):
+        proof_ref = "sha256:" + "a" * 64
         with pytest.raises(VerificationContextValidationError):
-            self._context(admitted=False, proof_ref="sha256:" + "a" * 64)
+            self._context(admitted=False, proof_ref=proof_ref)
 
     def test_dict_serialization(self):
         ctx = self._context()
@@ -241,25 +242,29 @@ class TestVerificationContextDocument:
             self._doc(verdict=Verdict.VERIFIED, proof_ref=None)
 
     def test_unverified_with_proof_ref_rejected(self):
+        proof_ref = "sha256:" + "a" * 64
         with pytest.raises(VerificationContextValidationError):
-            self._doc(verdict=Verdict.UNVERIFIABLE, proof_ref="sha256:" + "a" * 64)
+            self._doc(verdict=Verdict.UNVERIFIABLE, proof_ref=proof_ref)
 
-    def test_deny_with_verified_rejected(self):
+    def test_admit_with_unverified_verdict_rejected(self):
+        # UNVERIFIABLE verdict requires DENY admission; ADMIT with non-VERIFIED
+        # verdict must fail in VerificationContextDocument.__post_init__.
+        context = VerificationContext(
+            interpretation=Interpretation(theory="Test"),
+            proof=Proof(
+                verifier="Test", verifier_version="1.0",
+                configuration={}, theory_scope="test",
+                trusted_dependencies=(), outcome_treatment="fail-closed",
+            ),
+            evidence=Evidence(payload={"test": True}, proof_ref=None),
+            decision=Decision(admission=Admission.ADMIT),
+        )
         with pytest.raises(VerificationContextValidationError):
             VerificationContextDocument(
                 spec_version="1.0",
                 object={"formal_statement": "test"},
-                context=VerificationContext(
-                    interpretation=Interpretation(theory="Test"),
-                    proof=Proof(
-                        verifier="Test", verifier_version="1.0",
-                        configuration={}, theory_scope="test",
-                        trusted_dependencies=(), outcome_treatment="fail-closed",
-                    ),
-                    evidence=Evidence(payload={"test": True}, proof_ref="sha256:" + "a" * 64),
-                    decision=Decision(admission=Admission.DENY),
-                ),
-                verdict=Verdict.VERIFIED,
+                context=context,
+                verdict=Verdict.UNVERIFIABLE,
             )
 
     def test_dict_serialization(self):
@@ -400,60 +405,25 @@ class TestIsValidDocument:
             "verdict": verdict,
         }
 
-    def test_invalid_missing_object_rejected(self):
-        doc = {"spec_version": "1.0", "verdict": "VERIFIED"}
+    def test_empty_trusted_dependency_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["proof"]["trusted_dependencies"] = [""]
         assert is_valid_document(doc) is False
 
-    def test_invalid_missing_context_rejected(self):
-        doc = {"spec_version": "1.0", "object": {"formal_statement": "test"}, "verdict": "VERIFIED"}
+    def test_whitespace_trusted_dependency_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["proof"]["trusted_dependencies"] = [" "]
         assert is_valid_document(doc) is False
 
-    def test_invalid_missing_evidence_rejected(self):
-        doc = {
-            "spec_version": "1.0",
-            "object": {"formal_statement": "test"},
-            "context": {
-                "interpretation": {},
-                "proof": {},
-                "decision": {"admission": "ADMIT"},
-            },
-            "verdict": "VERIFIED",
-        }
+    def test_unserializable_config_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["proof"]["configuration"] = {"bad": object()}
         assert is_valid_document(doc) is False
 
-    def test_invalid_verified_without_proof_ref_rejected(self):
-        doc = self._full_doc(verdict="VERIFIED", admission="ADMIT", proof_ref=None)
+    def test_unserializable_payload_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["evidence"]["payload"] = {"bad": object()}
         assert is_valid_document(doc) is False
-
-    def test_invalid_non_verified_with_proof_ref_rejected(self):
-        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref="sha256:" + "a" * 64)
-        assert is_valid_document(doc) is False
-
-    def test_invalid_spec_version_rejected(self):
-        doc = self._full_doc()
-        doc["spec_version"] = "2.0"
-        assert is_valid_document(doc) is False
-
-    def test_invalid_verdict_rejected(self):
-        doc = self._full_doc()
-        doc["verdict"] = "INVALID"
-        assert is_valid_document(doc) is False
-
-    def test_non_dict_rejected(self):
-        assert is_valid_document("not-a-dict") is False
-
-    def _full_doc(self, verdict="VERIFIED", admission="ADMIT", proof_ref="sha256:" + "a" * 64):
-        return {
-            "spec_version": "1.0",
-            "object": {"formal_statement": "test claim"},
-            "context": {
-                "interpretation": {"theory": "Test", "logic": "deterministic"},
-                "proof": {"verifier": "Test", "verifier_version": "1.0", "configuration": {}, "theory_scope": "test", "trusted_dependencies": [], "outcome_treatment": "fail-closed"},
-                "evidence": {"payload": {"test": True}, "proof_ref": proof_ref},
-                "decision": {"admission": admission},
-            },
-            "verdict": verdict,
-        }
 
 
 # =============================================================================
