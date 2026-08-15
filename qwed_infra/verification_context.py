@@ -156,13 +156,13 @@ class Evidence:
     proof_ref: Optional[str] = None
 
     def __post_init__(self) -> None:
-        # Deep-copy the payload to prevent post-construction caller mutation from
-        # affecting the proof-bound document (aliases break proof_ref resolution).
-        object.__setattr__(self, 'payload', copy.deepcopy(self.payload))
         if not isinstance(self.payload, dict):
             raise VerificationContextValidationError(
                 "Evidence.payload must be a dict"
             )
+        # Deep-copy the payload to prevent post-construction caller mutation from
+        # affecting the proof-bound document (aliases break proof_ref resolution).
+        object.__setattr__(self, 'payload', copy.deepcopy(self.payload))
         if self.proof_ref is not None:
             if not isinstance(self.proof_ref, str) or not _PROOF_REF_PATTERN.fullmatch(self.proof_ref):
                 raise VerificationContextValidationError(
@@ -429,39 +429,74 @@ def is_valid_document(document: Mapping[str, Any]) -> bool:
 
 def _has_required_schema(document: Mapping[str, Any]) -> bool:
     """Check document has required object/context schema fields."""
+    if not _has_valid_object(document):
+        return False
+    if not _has_valid_context(document):
+        return False
+    return True
 
+
+def _has_valid_object(document: Mapping[str, Any]) -> bool:
     obj = document.get("object")
     if not isinstance(obj, Mapping):
         return False
     if not isinstance(obj.get("formal_statement"), str) or not obj.get("formal_statement", "").strip():
         return False
+    formalization = obj.get("formalization")
+    if formalization is not None:
+        if not isinstance(formalization, Mapping):
+            return False
+        for field in ("source_query", "translator"):
+            val = formalization.get(field)
+            if not isinstance(val, str) or not val.strip():
+                return False
+    return True
+
+
+def _has_valid_context(document: Mapping[str, Any]) -> bool:
     if not isinstance(document.get("context"), Mapping):
         return False
-
     context = document["context"]
     for field in ("interpretation", "proof", "evidence", "decision"):
         if not isinstance(context.get(field), Mapping):
             return False
-
-    # Validate structure for ALL verdicts, not just VERIFIED.
-    # Greptile: empty/invalid nested fields must be rejected for UNVERIFIABLE/BLOCKED too.
-    interpretation = context["interpretation"]
-    if not isinstance(interpretation.get("theory"), str) or not interpretation.get("theory", "").strip():
+    if not _has_valid_interpretation(context["interpretation"]):
         return False
-    if not isinstance(interpretation.get("logic"), str) or not interpretation.get("logic", "").strip():
+    if not _has_valid_proof(context["proof"]):
         return False
+    if not _has_valid_evidence(context["evidence"]):
+        return False
+    return True
 
-    proof = context["proof"]
-    for proof_field in ("verifier", "verifier_version", "theory_scope", "outcome_treatment"):
-        val = proof.get(proof_field)
+
+def _has_valid_interpretation(interp: Mapping[str, Any]) -> bool:
+    for field in ("theory", "logic"):
+        val = interp.get(field)
         if not isinstance(val, str) or not val.strip():
             return False
+    return True
 
-    evidence = context["evidence"]
+
+def _has_valid_proof(proof: Mapping[str, Any]) -> bool:
+    for field in ("verifier", "verifier_version", "theory_scope", "outcome_treatment"):
+        val = proof.get(field)
+        if not isinstance(val, str) or not val.strip():
+            return False
+    if not isinstance(proof.get("configuration"), Mapping):
+        return False
+    deps = proof.get("trusted_dependencies")
+    if not isinstance(deps, list):
+        return False
+    for dep in deps:
+        if not isinstance(dep, str):
+            return False
+    return True
+
+
+def _has_valid_evidence(evidence: Mapping[str, Any]) -> bool:
     payload = evidence.get("payload")
     if not isinstance(payload, dict) or payload is None:
         return False
-
     return True
 
 

@@ -501,20 +501,24 @@ class TestCanonicalJson:
         assert result == "[1,2]"
 
     def test_large_int_rejected(self):
+        val = 2**53 + 1
         with pytest.raises(VerificationContextValidationError):
-            _canonical_json(2**53 + 1)
+            _canonical_json(val)
 
     def test_nan_rejected(self):
+        val = float("nan")
         with pytest.raises(VerificationContextValidationError):
-            _canonical_json(float("nan"))
+            _canonical_json(val)
 
     def test_inf_rejected(self):
+        val = float("inf")
         with pytest.raises(VerificationContextValidationError):
-            _canonical_json(float("inf"))
+            _canonical_json(val)
 
     def test_unsupported_type_rejected(self):
+        val = object()
         with pytest.raises(VerificationContextValidationError):
-            _canonical_json(object())
+            _canonical_json(val)
 
     def test_unordered_dict_keys(self):
         result = _canonical_json({"zebra": 1, "apple": 2})
@@ -610,12 +614,14 @@ class TestEsNumberFormatting:
         assert _es_number_to_string(1e-5) == "0.00001"
 
     def test_nan_rejected(self):
+        val = float("nan")
         with pytest.raises(VerificationContextValidationError):
-            _es_number_to_string(float("nan"))
+            _es_number_to_string(val)
 
     def test_infinity_rejected(self):
+        val = float("inf")
         with pytest.raises(VerificationContextValidationError):
-            _es_number_to_string(float("inf"))
+            _es_number_to_string(val)
 
 
 def _es_number_to_string(value):
