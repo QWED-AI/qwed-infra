@@ -42,14 +42,7 @@ def _resolved_verifier_version(verifier_version: Optional[str]) -> str:
         return qwed_infra_version
 
 
-def verification_context_from_diagnostic_result(
-    result: InfraDiagnosticResult,
-    *,
-    formal_statement: str,
-    verifier: str,
-    verifier_version: Optional[str] = None,
-    attestation_token: Optional[str] = None,
-) -> VerificationContextDocument:
+def _validate_inputs(result, formal_statement, verifier, attestation_token):
     if not isinstance(formal_statement, str) or not formal_statement.strip():
         raise VerificationContextValidationError(
             "formal_statement must be a non-empty string"
@@ -62,35 +55,6 @@ def verification_context_from_diagnostic_result(
         raise VerificationContextValidationError(
             f"result must be an InfraDiagnosticResult, got {type(result).__name__}"
         )
-
-    # Fail-closed: cast malformed status values to the enum before verdict lookup,
-    # so strings like "VERIFIED" produce BLOCKED instead of mapping error.
-    try:
-        result_status = InfraDiagnosticStatus(result.status)
-    except ValueError:
-        result_status = InfraDiagnosticStatus.BLOCKED
-
-    # Rebuild the result with the cast enum status, so to_dict() works correctly.
-    # If the status isn't the enum instance, we always rebuild with the cast enum.
-    if result_status is not result.status:
-        per_status_update = InfraDiagnosticResult.blocked(
-            agent_message=f"Malformed status {result.status!r} demoted to BLOCKED",
-            developer_fields={"constraint_id": "verification_context.malformed_status"},
-        )
-    else:
-        per_status_update = result
-    result = per_status_update
-
-    result = per_status_update
-
-    if not isinstance(result.developer_fields, dict):
-        result = InfraDiagnosticResult.blocked(
-            agent_message="Diagnostic result is malformed",
-            developer_fields={
-                "constraint_id": "verification_context.malformed_developer_fields",
-            },
-        )
-
     if attestation_token is not None and (
         not isinstance(attestation_token, str) or not attestation_token.strip()
     ):
@@ -98,13 +62,91 @@ def verification_context_from_diagnostic_result(
             "attestation_token must be a non-empty string or None"
         )
 
+
+def _normalize_status(result):
+    """Cast malformed status to enum; rebuild as BLOCKED if not an enum instance."""
+    try:
+        result_status = InfraDiagnosticStatus(result.status)
+    except ValueError:
+        result_status = InfraDiagnosticStatus.BLOCKED
+    if result_status is not result.status:
+        return InfraDiagnosticResult.blocked(
+            agent_message=f"Malformed status {result.status!r} demoted to BLOCKED",
+            developer_fields={"constraint_id": "verification_context.malformed_status"},
+        )
+    return result
+
+
+def _normalize_developer_fields(result):
+    if not isinstance(result.developer_fields, dict):
+        return InfraDiagnosticResult.blocked(
+            agent_message="Diagnostic result is malformed",
+            developer_fields={
+                "constraint_id": "verification_context.malformed_developer_fields",
+            },
+        )
+    return result
+
+
+def _apply_attestation_policy(result, attestation_token):
+    """Demote VERIFIED to UNVERIFIABLE when attestation token is missing."""
     if result.status is InfraDiagnosticStatus.VERIFIED and attestation_token is None:
-        # Fail-closed: VERIFIED requires attestation to maintain authority;
-        # without it, demote to UNVERIFIABLE (consistent with core contract).
-        result = InfraDiagnosticResult.unverifiable(
+        return InfraDiagnosticResult.unverifiable(
             agent_message=result.agent_message,
             developer_fields=result.developer_fields,
         )
+    return result
+
+
+def _build_evidence_payload(result):
+    """Deep-copy result dict, move diagnostic proof_ref to nested key."""
+    evidence_payload = copy.deepcopy(result.to_dict())
+    diagnostic_proof_ref = evidence_payload.pop("proof_ref", None)
+    if diagnostic_proof_ref is not None:
+        evidence_payload["diagnostic_proof_ref"] = diagnostic_proof_ref
+    return evidence_payload
+
+
+def _compute_verified_proof_ref(formal_statement, interpretation, proof, evidence_payload, decision, formalization):
+    """Compute document-bound proof_ref for VERIFIED documents."""
+    from .verification_context import compute_document_proof_ref
+    obj = {"formal_statement": formal_statement}
+    if formalization is not None:
+        obj["formalization"] = formalization.to_dict()
+    doc_for_hash = {
+        "spec_version": SPEC_VERSION,
+        "object": obj,
+        "context": {
+            "interpretation": interpretation.to_dict(),
+            "proof": proof.to_dict(),
+            "evidence": {"payload": evidence_payload, "proof_ref": None},
+            "decision": decision.to_dict(),
+        },
+        "verdict": Verdict.VERIFIED.value,
+    }
+    return compute_document_proof_ref(doc_for_hash)
+
+
+_VERDICT_MAP = {
+    InfraDiagnosticStatus.VERIFIED: Verdict.VERIFIED,
+    InfraDiagnosticStatus.UNVERIFIABLE: Verdict.UNVERIFIABLE,
+    InfraDiagnosticStatus.BLOCKED: Verdict.BLOCKED,
+}
+
+
+def verification_context_from_diagnostic_result(
+    result: InfraDiagnosticResult,
+    *,
+    formal_statement: str,
+    verifier: str,
+    verifier_version: Optional[str] = None,
+    attestation_token: Optional[str] = None,
+) -> VerificationContextDocument:
+    _validate_inputs(result, formal_statement, verifier, attestation_token)
+
+    result = _normalize_status(result)
+    result = _normalize_developer_fields(result)
+    result = _apply_attestation_policy(result, attestation_token)
 
     interpretation = Interpretation(theory=f"{verifier} verification")
     proof = Proof(
@@ -120,30 +162,13 @@ def verification_context_from_diagnostic_result(
         translator=verifier,
     )
 
-    # Build evidence payload: preserve diagnostic fields, keep diagnostic proof_ref
-    # under a NESTED key (diagnostic_proof_ref) to avoid conflict with document proof_ref.
-    evidence_payload = copy.deepcopy(result.to_dict())
-    diagnostic_proof_ref = evidence_payload.pop("proof_ref", None)
-    if diagnostic_proof_ref is not None:
-        evidence_payload["diagnostic_proof_ref"] = diagnostic_proof_ref
+    evidence_payload = _build_evidence_payload(result)
 
     if result.status is InfraDiagnosticStatus.VERIFIED:
         decision = Decision(admission=Admission.ADMIT)
-        # Assemble context WITHOUT proof_ref to compute document-level hash,
-        # then set proof_ref from the assembled document.
-        from .verification_context import compute_document_proof_ref
-        doc_for_hash = {
-            "spec_version": SPEC_VERSION,
-            "object": {"formal_statement": formal_statement},
-            "context": {
-                "interpretation": interpretation.to_dict(),
-                "proof": proof.to_dict(),
-                "evidence": {"payload": evidence_payload, "proof_ref": None},
-                "decision": decision.to_dict(),
-            },
-            "verdict": Verdict.VERIFIED.value,
-        }
-        proof_ref = compute_document_proof_ref(doc_for_hash)
+        proof_ref = _compute_verified_proof_ref(
+            formal_statement, interpretation, proof, evidence_payload, decision, formalization
+        )
     else:
         decision = Decision(admission=Admission.DENY)
         proof_ref = None
@@ -159,10 +184,6 @@ def verification_context_from_diagnostic_result(
         spec_version=SPEC_VERSION,
         object={"formal_statement": formal_statement},
         context=context,
-        verdict={
-            InfraDiagnosticStatus.VERIFIED: Verdict.VERIFIED,
-            InfraDiagnosticStatus.UNVERIFIABLE: Verdict.UNVERIFIABLE,
-            InfraDiagnosticStatus.BLOCKED: Verdict.BLOCKED,
-        }[result.status],
+        verdict=_VERDICT_MAP[result.status],
         formalization=formalization,
     )

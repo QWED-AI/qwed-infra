@@ -128,6 +128,7 @@ class Proof:
             raise VerificationContextValidationError(
                 "Proof.configuration must be a dict"
             )
+        object.__setattr__(self, 'configuration', copy.deepcopy(self.configuration))
         if not isinstance(self.trusted_dependencies, tuple):
             raise VerificationContextValidationError(
                 "Proof.trusted_dependencies must be a tuple of strings"
@@ -247,25 +248,6 @@ def _canonical_json(value: Any) -> str:
     )
 
 
-def _canonical_json(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return _canonical_json_number(value)
-    if isinstance(value, str):
-        _reject_unpaired_surrogates(value)
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, (list, tuple)):
-        return "[" + ",".join(_canonical_json(item) for item in value) + "]"
-    if isinstance(value, Mapping):
-        return _canonical_json_mapping(value)
-    raise VerificationContextValidationError(
-        f"unsupported type in proof_ref payload: {type(value).__name__}"
-    )
-
-
 def _canonical_json_number(value) -> str:
     """Serialize int/float to canonical JSON with IEEE-754 float semantics."""
     if isinstance(value, int):
@@ -317,17 +299,40 @@ def _es_number_to_string(value: float) -> str:
         )
     if value == 0:
         return "0"
-    r = repr(value)
-    # Integer-valued floats within ECMAScript safe integer range: strip trailing .0
-    if r.endswith('.0') and not ('e' in r.lower() or 'inf' in r.lower()):
-        return r[:-2]
-    # Normalize exponential: 1e-07 -> 1e-7, 1e+07 -> 1e+7
-    r = re.sub(
-        r'e([+-])(\d+)',
-        lambda m: f'e{m.group(1)}{int(m.group(2))}',
-        r,
-    )
-    return r
+    neg = value < 0
+    abs_val = abs(value)
+    coeff, e10 = _parse_es_decimal(abs_val)
+    if coeff == 0:
+        return "0"
+    # Strip trailing zeros from coefficient and adjust exponent
+    # (e.g., 420, -1 -> 42, 0 so 42.0 serializes as "42")
+    while coeff > 0 and coeff % 10 == 0:
+        coeff //= 10
+        e10 += 1
+    # ECMAScript thresholds: exponential for >= 1e21 or < 1e-6
+    if abs_val >= 1e21 or abs_val < 1e-6:
+        out = _format_es_exponential(coeff, e10)
+    else:
+        out = _format_es_decimal(coeff, e10)
+    if neg:
+        return "-" + out
+    return out
+
+
+def _format_es_exponential(coeff: int, exponent: int) -> str:
+    """Format number in ECMAScript exponential notation (e.g., 1e+21, 1e-7)."""
+    s = str(coeff)
+    if len(s) == 1:
+        mantissa = s
+        exp = exponent
+    else:
+        mantissa = s[0] + "." + s[1:]
+        exp = exponent + len(s) - 1
+    # Strip trailing zeros in mantissa decimal part
+    if "." in mantissa:
+        mantissa = mantissa.rstrip("0").rstrip(".")
+    exp_str = f"e+{exp}" if exp >= 0 else f"e{exp}"
+    return mantissa + exp_str
 
 
 def _parse_es_decimal(value: float) -> Tuple[int, int]:
@@ -335,7 +340,6 @@ def _parse_es_decimal(value: float) -> Tuple[int, int]:
         raise VerificationContextValidationError(
             f"non-finite number not allowed: {value!r}"
         )
-    import decimal
     d = decimal.Decimal(repr(value))
     _, digits, exponent = d.as_tuple()
     coeff = int("".join(str(i) for i in digits))
@@ -370,7 +374,7 @@ def _reject_unpaired_surrogates(value: str) -> None:
 
 
 def compute_document_proof_ref(document: Mapping[str, Any]) -> str:
-    formal_statement = document["object"]["formal_statement"]
+    object_dict = dict(document["object"])
     context_dict = document["context"]
     evidence_dict = {
         key: value
@@ -378,7 +382,7 @@ def compute_document_proof_ref(document: Mapping[str, Any]) -> str:
         if key != "proof_ref"
     }
     bound = {
-        "formal_statement": formal_statement,
+        "object": object_dict,
         "context": {**context_dict, "evidence": evidence_dict},
     }
     payload = _canonical_json(bound)
@@ -448,8 +452,10 @@ def _has_required_schema(document: Mapping[str, Any]) -> bool:
         return False
 
     proof = context["proof"]
-    if not isinstance(proof.get("verifier"), str) or not proof.get("verifier", "").strip():
-        return False
+    for proof_field in ("verifier", "verifier_version", "theory_scope", "outcome_treatment"):
+        val = proof.get(proof_field)
+        if not isinstance(val, str) or not val.strip():
+            return False
 
     evidence = context["evidence"]
     payload = evidence.get("payload")

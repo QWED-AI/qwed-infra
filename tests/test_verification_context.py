@@ -582,11 +582,9 @@ def _thaw_value(value):
 
 class TestEsNumberFormatting:
     def test_positive_integer(self):
-        # ECMAScript Number::toString: integer-valued float -> integer-form digits
         assert _es_number_to_string(42.0) == "42"
 
     def test_negative_integer(self):
-        # ECMAScript Number::toString: integer-valued float -> integer-form digits
         assert _es_number_to_string(-42.0) == "-42"
 
     def test_zero(self):
@@ -595,12 +593,21 @@ class TestEsNumberFormatting:
     def test_decimal(self):
         assert _es_number_to_string(4.5) == "4.5"
 
-    def test_exponent_positive(self):
-        # ECMAScript Number::toString: integer-valued float -> integer-form digits
-        assert _es_number_to_string(450.0) == "450"
+    def test_large_integer_float(self):
+        # ECMAScript: 1e16 is within fixed-point range -> "10000000000000000"
+        assert _es_number_to_string(1e16) == "10000000000000000"
 
-    def test_exponent_negative(self):
-        assert _es_number_to_string(0.045) == "0.045"
+    def test_exponential_threshold_upper(self):
+        # ECMAScript: >= 1e21 uses exponential -> "1e+21"
+        assert _es_number_to_string(1e21) == "1e+21"
+
+    def test_exponential_threshold_lower(self):
+        # ECMAScript: < 1e-6 uses exponential -> "1e-7"
+        assert _es_number_to_string(1e-7) == "1e-7"
+
+    def test_within_threshold_fixed(self):
+        # ECMAScript: 1e-5 is >= 1e-6, uses fixed -> "0.00001"
+        assert _es_number_to_string(1e-5) == "0.00001"
 
     def test_nan_rejected(self):
         with pytest.raises(VerificationContextValidationError):
@@ -705,9 +712,10 @@ class TestBridge:
         assert vc.context.evidence.proof_ref is None
 
     def test_empty_formal_statement_rejected(self):
+        result = self._verified_result()
         with pytest.raises(VerificationContextValidationError):
             verification_context_from_diagnostic_result(
-                self._verified_result(),
+                result,
                 formal_statement="",
                 verifier="IamGuard",
             )
@@ -731,9 +739,10 @@ class TestBridge:
         assert vc.context.decision.admission == Admission.DENY
 
     def test_empty_verifier_rejected(self):
+        result = self._verified_result()
         with pytest.raises(VerificationContextValidationError):
             verification_context_from_diagnostic_result(
-                self._verified_result(),
+                result,
                 formal_statement="test claim",
                 verifier="",
             )
