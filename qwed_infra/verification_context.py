@@ -11,6 +11,7 @@ See: qwed-verification/spec/v1.0/verification-context.md
 from __future__ import annotations
 
 import copy
+import decimal
 import hashlib
 import json
 import math
@@ -141,7 +142,7 @@ class Proof:
         return {
             "verifier": self.verifier,
             "verifier_version": self.verifier_version,
-            "configuration": self.configuration,
+            "configuration": copy.deepcopy(self.configuration),
             "theory_scope": self.theory_scope,
             "trusted_dependencies": list(self.trusted_dependencies),
             "outcome_treatment": self.outcome_treatment,
@@ -154,6 +155,9 @@ class Evidence:
     proof_ref: Optional[str] = None
 
     def __post_init__(self) -> None:
+        # Deep-copy the payload to prevent post-construction caller mutation from
+        # affecting the proof-bound document (aliases break proof_ref resolution).
+        object.__setattr__(self, 'payload', copy.deepcopy(self.payload))
         if not isinstance(self.payload, dict):
             raise VerificationContextValidationError(
                 "Evidence.payload must be a dict"
@@ -166,7 +170,7 @@ class Evidence:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "payload": self.payload,
+            "payload": copy.deepcopy(self.payload),
             "proof_ref": self.proof_ref,
         }
 
@@ -229,57 +233,101 @@ def _canonical_json(value: Any) -> str:
         return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, int):
-        try:
-            as_float = float(value)
-        except OverflowError as exc:
-            raise VerificationContextValidationError(
-                f"integer not representable as IEEE-754 double: {value!r}"
-            ) from exc
-        if int(as_float) != value:
-            raise VerificationContextValidationError(
-                f"integer not representable as IEEE-754 double: {value!r}"
-            )
-        return _es_number_to_string(as_float)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise VerificationContextValidationError(
-                f"non-finite number not allowed in proof_ref payload: {value!r}"
-            )
-        return _es_number_to_string(value)
+    if isinstance(value, (int, float)):
+        return _canonical_json_number(value)
     if isinstance(value, str):
         _reject_unpaired_surrogates(value)
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(_canonical_json(item) for item in value) + "]"
     if isinstance(value, Mapping):
-        for key in value:
-            if not isinstance(key, str):
-                raise VerificationContextValidationError(
-                    f"non-string object key not allowed in proof_ref payload: {key!r}"
-                )
-            _reject_unpaired_surrogates(key)
-        items = sorted(value.items(), key=lambda kv: kv[0].encode("utf-16-be"))
-        return (
-            "{"
-            + ",".join(
-                json.dumps(k, ensure_ascii=False) + ":" + _canonical_json(v)
-                for k, v in items
-            )
-            + "}"
-        )
+        return _canonical_json_mapping(value)
     raise VerificationContextValidationError(
         f"unsupported type in proof_ref payload: {type(value).__name__}"
     )
 
 
+def _canonical_json(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return _canonical_json_number(value)
+    if isinstance(value, str):
+        _reject_unpaired_surrogates(value)
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_canonical_json(item) for item in value) + "]"
+    if isinstance(value, Mapping):
+        return _canonical_json_mapping(value)
+    raise VerificationContextValidationError(
+        f"unsupported type in proof_ref payload: {type(value).__name__}"
+    )
+
+
+def _canonical_json_number(value) -> str:
+    """Serialize int/float to canonical JSON with IEEE-754 float semantics."""
+    if isinstance(value, int):
+        if not _is_safe_integer(value):
+            raise VerificationContextValidationError(
+                f"integer not representable as IEEE-754 double: {value!r}"
+            )
+        return str(value)
+    if not math.isfinite(value):
+        raise VerificationContextValidationError(
+            f"non-finite number not allowed in proof_ref payload: {value!r}"
+        )
+    if not isinstance(value, bool) and isinstance(value, float):
+        return _es_number_to_string(value)
+    raise VerificationContextValidationError(
+        f"unsupported numeric type in proof_ref payload: {type(value).__name__}"
+    )
+
+
+def _is_safe_integer(value: int) -> bool:
+    """Check if int is safely representable as IEEE-754 double."""
+    return -(2**53 - 1) <= value <= 2**53 - 1
+
+
+def _canonical_json_mapping(value) -> str:
+    """Serialize Mapping to canonical JSON with sorted keys (UTF-16-BE order)."""
+    for key in value:
+        if not isinstance(key, str):
+            raise VerificationContextValidationError(
+                f"non-string object key not allowed in proof_ref payload: {key!r}"
+            )
+        _reject_unpaired_surrogates(key)
+    items = sorted(value.items(), key=lambda kv: kv[0].encode("utf-16-be"))
+    return (
+        "{"
+        + ",".join(
+            json.dumps(k, ensure_ascii=False) + ":" + _canonical_json(v)
+            for k, v in items
+        )
+        + "}"
+    )
+
+
 def _es_number_to_string(value: float) -> str:
-    neg = value < 0
-    coeff, e10 = _parse_es_decimal(value)
-    out = _format_es_decimal(coeff, e10)
-    if neg and out != "0":
-        return "-" + out
-    return out
+    """Serialize float to ECMAScript Number::toString (RFC 8785/JCS compatible)."""
+    if not math.isfinite(value):
+        raise VerificationContextValidationError(
+            f"non-finite number not allowed in proof_ref payload: {value!r}"
+        )
+    if value == 0:
+        return "0"
+    r = repr(value)
+    # Integer-valued floats within ECMAScript safe integer range: strip trailing .0
+    if r.endswith('.0') and not ('e' in r.lower() or 'inf' in r.lower()):
+        return r[:-2]
+    # Normalize exponential: 1e-07 -> 1e-7, 1e+07 -> 1e+7
+    r = re.sub(
+        r'e([+-])(\d+)',
+        lambda m: f'e{m.group(1)}{int(m.group(2))}',
+        r,
+    )
+    return r
 
 
 def _parse_es_decimal(value: float) -> Tuple[int, int]:
@@ -289,7 +337,7 @@ def _parse_es_decimal(value: float) -> Tuple[int, int]:
         )
     import decimal
     d = decimal.Decimal(repr(value))
-    sign, digits, exponent = d.as_tuple()
+    _, digits, exponent = d.as_tuple()
     coeff = int("".join(str(i) for i in digits))
     return coeff, exponent
 
@@ -356,56 +404,69 @@ def is_valid_document(document: Mapping[str, Any]) -> bool:
             return False
         if document.get("spec_version") != SPEC_VERSION:
             return False
-        if document.get("verdict") not in {"VERIFIED", "UNVERIFIABLE", "BLOCKED"}:
+        verdict = document.get("verdict")
+        if verdict not in {"VERIFIED", "UNVERIFIABLE", "BLOCKED"}:
+            return False
+        if not _has_required_schema(document):
             return False
 
-        verdict = document["verdict"]
-        obj = document.get("object")
-        if not isinstance(obj, Mapping):
-            return False
-        if not isinstance(obj.get("formal_statement"), str) or not obj.get("formal_statement", "").strip():
-            return False
-
-        context = document.get("context")
-        if not isinstance(context, Mapping):
-            return False
-
-        # Required schema fields
-        if not isinstance(context.get("interpretation"), Mapping):
-            return False
-        if not isinstance(context.get("proof"), Mapping):
-            return False
-        if not isinstance(context.get("evidence"), Mapping):
-            return False
-        if not isinstance(context.get("decision"), Mapping):
-            return False
-
-        decision = context["decision"]
-        admission = decision.get("admission")
-        if admission not in {"ADMIT", "DENY"}:
-            return False
-
+        context = document["context"]
+        admission = context["decision"].get("admission")
         evidence = context["evidence"]
         proof_ref = evidence.get("proof_ref")
 
-        # Verdict/admission invariants
         if verdict == "VERIFIED":
-            if admission != "ADMIT":
-                return False
-            if proof_ref is None or not isinstance(proof_ref, str) or not proof_ref.startswith("sha256:"):
-                return False
-            # FAIL-CLOSED: proof_ref must resolve against the document
-            return resolve_document_proof_ref(document)
-        else:
-            # UNVERIFIABLE/BLOCKED: must DENY, must not have proof_ref
-            if admission != "DENY":
-                return False
-            return proof_ref is None
+            return _is_valid_verified(document, admission, proof_ref)
+        return admission == "DENY" and proof_ref is None
 
     except (VerificationContextValidationError, KeyError, TypeError, AttributeError):
         return False
 
 
+def _has_required_schema(document: Mapping[str, Any]) -> bool:
+    """Check document has required object/context schema fields."""
+
+    obj = document.get("object")
+    if not isinstance(obj, Mapping):
+        return False
+    if not isinstance(obj.get("formal_statement"), str) or not obj.get("formal_statement", "").strip():
+        return False
+    if not isinstance(document.get("context"), Mapping):
+        return False
+
+    context = document["context"]
+    for field in ("interpretation", "proof", "evidence", "decision"):
+        if not isinstance(context.get(field), Mapping):
+            return False
+
+    # Validate structure for ALL verdicts, not just VERIFIED.
+    # Greptile: empty/invalid nested fields must be rejected for UNVERIFIABLE/BLOCKED too.
+    interpretation = context["interpretation"]
+    if not isinstance(interpretation.get("theory"), str) or not interpretation.get("theory", "").strip():
+        return False
+    if not isinstance(interpretation.get("logic"), str) or not interpretation.get("logic", "").strip():
+        return False
+
+    proof = context["proof"]
+    if not isinstance(proof.get("verifier"), str) or not proof.get("verifier", "").strip():
+        return False
+
+    evidence = context["evidence"]
+    payload = evidence.get("payload")
+    if not isinstance(payload, dict) or payload is None:
+        return False
+
+    return True
+
+
+def _is_valid_verified(document: Mapping[str, Any], admission: Optional[str], proof_ref: Optional[str]) -> bool:
+    """Validate VERIFIED document: ADMIT + resolvable proof_ref required."""
+    if admission != "ADMIT":
+        return False
+    if not isinstance(proof_ref, str) or not proof_ref.startswith("sha256:"):
+        return False
+    # FAIL-CLOSED: proof_ref must resolve against the document
+    return resolve_document_proof_ref(document)
 @dataclass(frozen=True)
 class VerificationContextDocument:
     spec_version: str
@@ -415,6 +476,7 @@ class VerificationContextDocument:
     formalization: Optional[Formalization] = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, 'object', copy.deepcopy(self.object))
         if self.spec_version != SPEC_VERSION:
             raise VerificationContextValidationError(
                 f"spec_version must be {SPEC_VERSION}"

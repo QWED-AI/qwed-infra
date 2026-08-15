@@ -63,6 +63,26 @@ def verification_context_from_diagnostic_result(
             f"result must be an InfraDiagnosticResult, got {type(result).__name__}"
         )
 
+    # Fail-closed: cast malformed status values to the enum before verdict lookup,
+    # so strings like "VERIFIED" produce BLOCKED instead of mapping error.
+    try:
+        result_status = InfraDiagnosticStatus(result.status)
+    except ValueError:
+        result_status = InfraDiagnosticStatus.BLOCKED
+
+    # Rebuild the result with the cast enum status, so to_dict() works correctly.
+    # If the status isn't the enum instance, we always rebuild with the cast enum.
+    if result_status is not result.status:
+        per_status_update = InfraDiagnosticResult.blocked(
+            agent_message=f"Malformed status {result.status!r} demoted to BLOCKED",
+            developer_fields={"constraint_id": "verification_context.malformed_status"},
+        )
+    else:
+        per_status_update = result
+    result = per_status_update
+
+    result = per_status_update
+
     if not isinstance(result.developer_fields, dict):
         result = InfraDiagnosticResult.blocked(
             agent_message="Diagnostic result is malformed",

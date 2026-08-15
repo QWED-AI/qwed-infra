@@ -224,8 +224,8 @@ class TestVerificationContextDocument:
         assert doc.verdict == Verdict.UNVERIFIABLE
 
     def test_invalid_spec_version_rejected(self):
+        doc = self._doc()
         with pytest.raises(VerificationContextValidationError):
-            doc = self._doc()
             VerificationContextDocument(
                 spec_version="2.0",
                 object={"formal_statement": "test"},
@@ -460,12 +460,14 @@ class TestIsValidDocument:
 class TestCanonicalJson:
     def test_simple_object(self):
         result = _canonical_json({"b": 1, "a": 2})
-        assert '"a":2.0' in result
+        # Integer-valued floats serialize as integers per ECMAScript
+        assert '"a":2' in result
         assert result.index('"a"') < result.index('"b"')
 
     def test_nested_object(self):
         result = _canonical_json({"outer": {"inner": [1, 2]}})
-        assert '"outer":{"inner":[1.0,2.0]}' in result
+        # Integer-valued floats serialize as integers per ECMAScript
+        assert '"outer":{"inner":[1,2]}' in result
 
     def test_null(self):
         assert _canonical_json(None) == "null"
@@ -475,10 +477,10 @@ class TestCanonicalJson:
         assert _canonical_json(False) == "false"
 
     def test_int(self):
-        # RFC 8785: int→float path, serialize via IEEE-754 float
-        assert _canonical_json(42) == "42.0"
-        assert _canonical_json(0) == "0"  # coefficient=0 special case
-        assert _canonical_json(-42) == "-42.0"
+        # ECMAScript Number::toString: integer-valued float -> integer-form digits
+        assert _canonical_json(42) == "42"
+        assert _canonical_json(0) == "0"
+        assert _canonical_json(-42) == "-42"
 
     def test_float(self):
         assert _canonical_json(4.5) == "4.5"
@@ -491,11 +493,12 @@ class TestCanonicalJson:
 
     def test_list(self):
         result = _canonical_json([3, 1, 2])
-        assert result == "[3.0,1.0,2.0]"
+        # ECMAScript: integer-valued floats serialize as integers
+        assert result == "[3,1,2]"
 
     def test_tuple_converts_to_list(self):
         result = _canonical_json((1, 2))
-        assert result == "[1.0,2.0]"
+        assert result == "[1,2]"
 
     def test_large_int_rejected(self):
         with pytest.raises(VerificationContextValidationError):
@@ -519,7 +522,7 @@ class TestCanonicalJson:
 
     def test_nested_list(self):
         result = _canonical_json([[1, 2], [3, 4]])
-        assert result == "[[1.0,2.0],[3.0,4.0]]"
+        assert result == "[[1,2],[3,4]]"
 
 
 # =============================================================================
@@ -579,11 +582,12 @@ def _thaw_value(value):
 
 class TestEsNumberFormatting:
     def test_positive_integer(self):
-        # RFC 8785: int→float path, 42.0 → "42.0"
-        assert _es_number_to_string(42.0) == "42.0"
+        # ECMAScript Number::toString: integer-valued float -> integer-form digits
+        assert _es_number_to_string(42.0) == "42"
 
     def test_negative_integer(self):
-        assert _es_number_to_string(-42.0) == "-42.0"
+        # ECMAScript Number::toString: integer-valued float -> integer-form digits
+        assert _es_number_to_string(-42.0) == "-42"
 
     def test_zero(self):
         assert _es_number_to_string(0.0) == "0"
@@ -592,7 +596,8 @@ class TestEsNumberFormatting:
         assert _es_number_to_string(4.5) == "4.5"
 
     def test_exponent_positive(self):
-        assert _es_number_to_string(450.0) == "450.0"
+        # ECMAScript Number::toString: integer-valued float -> integer-form digits
+        assert _es_number_to_string(450.0) == "450"
 
     def test_exponent_negative(self):
         assert _es_number_to_string(0.045) == "0.045"
@@ -706,6 +711,24 @@ class TestBridge:
                 formal_statement="",
                 verifier="IamGuard",
             )
+
+    def test_malformed_status_blocked_fail_closed(self):
+        # Malformed string status ("VERIFIED" as string) must produce BLOCKED
+        # as fail-closed protection (no AttributeError through the bridge).
+        result = object.__new__(InfraDiagnosticResult)
+        object.__setattr__(result, 'status', "VERIFIED")  # string, not enum
+        object.__setattr__(result, 'agent_message', "test")
+        object.__setattr__(result, 'developer_fields', {"test": 1})
+        object.__setattr__(result, 'proof_ref', "sha256:" + "a" * 64)
+
+        vc = verification_context_from_diagnostic_result(
+            result,
+            formal_statement="test claim",
+            verifier="IamGuard",
+        )
+        # Malformed status demotes to BLOCKED, not ADMIT
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
 
     def test_empty_verifier_rejected(self):
         with pytest.raises(VerificationContextValidationError):
