@@ -15,9 +15,8 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
-from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -114,8 +113,12 @@ class Proof:
     outcome_treatment: str
 
     def __post_init__(self) -> None:
-        for field_name in ("verifier", "verifier_version", "theory_scope", "outcome_treatment"):
-            value = getattr(self, field_name)
+        for field_name, value in (
+            ("verifier", self.verifier),
+            ("verifier_version", self.verifier_version),
+            ("theory_scope", self.theory_scope),
+            ("outcome_treatment", self.outcome_treatment),
+        ):
             if not isinstance(value, str) or not value.strip():
                 raise VerificationContextValidationError(
                     f"Proof.{field_name} must be a non-empty string"
@@ -190,17 +193,22 @@ class VerificationContext:
     decision: Decision
 
     def __post_init__(self) -> None:
-        for field_name, expected_type in (
-            ("interpretation", Interpretation),
-            ("proof", Proof),
-            ("evidence", Evidence),
-            ("decision", Decision),
-        ):
-            value = getattr(self, field_name)
-            if not isinstance(value, expected_type):
-                raise VerificationContextValidationError(
-                    f"VerificationContext.{field_name} must be a {expected_type.__name__}"
-                )
+        if not isinstance(self.interpretation, Interpretation):
+            raise VerificationContextValidationError(
+                "VerificationContext.interpretation must be a Interpretation"
+            )
+        if not isinstance(self.proof, Proof):
+            raise VerificationContextValidationError(
+                "VerificationContext.proof must be a Proof"
+            )
+        if not isinstance(self.evidence, Evidence):
+            raise VerificationContextValidationError(
+                "VerificationContext.evidence must be a Evidence"
+            )
+        if not isinstance(self.decision, Decision):
+            raise VerificationContextValidationError(
+                "VerificationContext.decision must be a Decision"
+            )
         if self.evidence.proof_ref is not None and self.decision.admission is Admission.DENY:
             raise VerificationContextValidationError(
                 "DENY admission requires proof_ref is None — "
@@ -350,8 +358,51 @@ def is_valid_document(document: Mapping[str, Any]) -> bool:
             return False
         if document.get("verdict") not in {"VERIFIED", "UNVERIFIABLE", "BLOCKED"}:
             return False
-        return True
-    except (KeyError, TypeError, AttributeError):
+
+        verdict = document["verdict"]
+        obj = document.get("object")
+        if not isinstance(obj, Mapping):
+            return False
+        if not isinstance(obj.get("formal_statement"), str) or not obj.get("formal_statement", "").strip():
+            return False
+
+        context = document.get("context")
+        if not isinstance(context, Mapping):
+            return False
+
+        # Required schema fields
+        if not isinstance(context.get("interpretation"), Mapping):
+            return False
+        if not isinstance(context.get("proof"), Mapping):
+            return False
+        if not isinstance(context.get("evidence"), Mapping):
+            return False
+        if not isinstance(context.get("decision"), Mapping):
+            return False
+
+        decision = context["decision"]
+        admission = decision.get("admission")
+        if admission not in {"ADMIT", "DENY"}:
+            return False
+
+        evidence = context["evidence"]
+        proof_ref = evidence.get("proof_ref")
+
+        # Verdict/admission invariants
+        if verdict == "VERIFIED":
+            if admission != "ADMIT":
+                return False
+            if proof_ref is None or not isinstance(proof_ref, str) or not proof_ref.startswith("sha256:"):
+                return False
+            # FAIL-CLOSED: proof_ref must resolve against the document
+            return resolve_document_proof_ref(document)
+        else:
+            # UNVERIFIABLE/BLOCKED: must DENY, must not have proof_ref
+            if admission != "DENY":
+                return False
+            return proof_ref is None
+
+    except (VerificationContextValidationError, KeyError, TypeError, AttributeError):
         return False
 
 
@@ -399,12 +450,13 @@ class VerificationContextDocument:
             )
 
     def to_dict(self) -> Dict[str, Any]:
+        object_dict = copy.deepcopy(self.object)
+        if self.formalization is not None:
+            object_dict["formalization"] = self.formalization.to_dict()
         doc = {
             "spec_version": self.spec_version,
-            "object": self.object,
+            "object": object_dict,
             "context": self.context.to_dict(),
             "verdict": self.verdict.value,
         }
-        if self.formalization is not None:
-            doc["object"]["formalization"] = self.formalization.to_dict()
         return doc

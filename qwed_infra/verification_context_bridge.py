@@ -19,6 +19,7 @@ from .verification_context import (
     Formalization,
     Interpretation,
     Proof,
+    SPEC_VERSION,
     Verdict,
     VerificationContext,
     VerificationContextDocument,
@@ -70,6 +71,13 @@ def verification_context_from_diagnostic_result(
             },
         )
 
+    if attestation_token is not None and (
+        not isinstance(attestation_token, str) or not attestation_token.strip()
+    ):
+        raise VerificationContextValidationError(
+            "attestation_token must be a non-empty string or None"
+        )
+
     if result.status is InfraDiagnosticStatus.VERIFIED and attestation_token is None:
         # Fail-closed: VERIFIED requires attestation to maintain authority;
         # without it, demote to UNVERIFIABLE (consistent with core contract).
@@ -82,7 +90,7 @@ def verification_context_from_diagnostic_result(
     proof = Proof(
         verifier=verifier,
         verifier_version=_resolved_verifier_version(verifier_version),
-        configuration={},
+        configuration={} if attestation_token is None else {"attestation": "present"},
         theory_scope=f"{verifier} deterministic verification",
         trusted_dependencies=("qwed-infra",),
         outcome_treatment="unknown/timeout/error resolve to UNVERIFIABLE or BLOCKED",
@@ -92,13 +100,30 @@ def verification_context_from_diagnostic_result(
         translator=verifier,
     )
 
+    # Build evidence payload: preserve diagnostic fields, keep diagnostic proof_ref
+    # under a NESTED key (diagnostic_proof_ref) to avoid conflict with document proof_ref.
     evidence_payload = copy.deepcopy(result.to_dict())
-    # Exclude proof_ref from bound payload (it commits to itself)
-    evidence_payload.pop("proof_ref", None)
+    diagnostic_proof_ref = evidence_payload.pop("proof_ref", None)
+    if diagnostic_proof_ref is not None:
+        evidence_payload["diagnostic_proof_ref"] = diagnostic_proof_ref
 
     if result.status is InfraDiagnosticStatus.VERIFIED:
         decision = Decision(admission=Admission.ADMIT)
-        proof_ref = result.proof_ref
+        # Assemble context WITHOUT proof_ref to compute document-level hash,
+        # then set proof_ref from the assembled document.
+        from .verification_context import compute_document_proof_ref
+        doc_for_hash = {
+            "spec_version": SPEC_VERSION,
+            "object": {"formal_statement": formal_statement},
+            "context": {
+                "interpretation": interpretation.to_dict(),
+                "proof": proof.to_dict(),
+                "evidence": {"payload": evidence_payload, "proof_ref": None},
+                "decision": decision.to_dict(),
+            },
+            "verdict": Verdict.VERIFIED.value,
+        }
+        proof_ref = compute_document_proof_ref(doc_for_hash)
     else:
         decision = Decision(admission=Admission.DENY)
         proof_ref = None
@@ -110,16 +135,14 @@ def verification_context_from_diagnostic_result(
         decision=decision,
     )
 
-    verdict_map = {
-        InfraDiagnosticStatus.VERIFIED: Verdict.VERIFIED,
-        InfraDiagnosticStatus.UNVERIFIABLE: Verdict.UNVERIFIABLE,
-        InfraDiagnosticStatus.BLOCKED: Verdict.BLOCKED,
-    }
-
     return VerificationContextDocument(
-        spec_version="1.0",
+        spec_version=SPEC_VERSION,
         object={"formal_statement": formal_statement},
         context=context,
-        verdict=verdict_map[result.status],
+        verdict={
+            InfraDiagnosticStatus.VERIFIED: Verdict.VERIFIED,
+            InfraDiagnosticStatus.UNVERIFIABLE: Verdict.UNVERIFIABLE,
+            InfraDiagnosticStatus.BLOCKED: Verdict.BLOCKED,
+        }[result.status],
         formalization=formalization,
     )
