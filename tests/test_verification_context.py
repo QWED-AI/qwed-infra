@@ -217,6 +217,16 @@ class TestVerificationContextDocument:
         assert doc.verdict == Verdict.VERIFIED
         assert doc.context.decision.admission == Admission.ADMIT
 
+    def test_non_formalization_value_rejected(self):
+        with pytest.raises(VerificationContextValidationError):
+            VerificationContextDocument(
+                spec_version="1.0",
+                object={"formal_statement": "test claim"},
+                context=self._doc().context,
+                verdict=Verdict.BLOCKED,
+                formalization="not-a-formalization",
+            )
+
     def test_valid_unverifiable(self):
         doc = VerificationContextDocument(
             spec_version="1.0",
@@ -436,6 +446,11 @@ class TestIsValidDocument:
     def test_unserializable_object_rejected(self):
         doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
         doc["object"]["formal_statement"] = {"bad": object()}
+        assert is_valid_document(doc) is False
+
+    def test_missing_proof_ref_key_rejected(self):
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        del doc["context"]["evidence"]["proof_ref"]
         assert is_valid_document(doc) is False
 
     def test_unserializable_formalization_rejected(self):

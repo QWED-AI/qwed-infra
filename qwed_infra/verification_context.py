@@ -561,6 +561,10 @@ def _has_valid_evidence(evidence: Mapping[str, Any]) -> bool:
     payload = evidence.get("payload")
     if not isinstance(payload, dict) or not _is_serializable(payload):
         return False
+    # proof_ref key must be present (explicitly null for non-VERIFIED);
+    # an absent member is not the same as an explicit null.
+    if "proof_ref" not in evidence:
+        return False
     return True
 
 
@@ -581,6 +585,10 @@ class VerificationContextDocument:
     formalization: Optional[Formalization] = None
 
     def __post_init__(self) -> None:
+        if self.formalization is not None and not isinstance(self.formalization, Formalization):
+            raise VerificationContextValidationError(
+                "formalization must be a Formalization instance or None"
+            )
         if not isinstance(self.object, dict):
             raise VerificationContextValidationError(
                 "object must be a dict with formal_statement"
