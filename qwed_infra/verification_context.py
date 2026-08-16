@@ -371,18 +371,16 @@ def _format_es_decimal(coeff: int, exponent: int) -> str:
 
 
 def _reject_unpaired_surrogates(value: str) -> None:
+    # Any surrogate code point (paired or unpaired) is rejected: Python str
+    # stores supplementary characters as real scalar values, so any code unit
+    # in the surrogate range cannot be UTF-8 encoded for canonical hashing.
+    # RFC 8785 requires valid Unicode scalar values, which exclude surrogates.
     for i, ch in enumerate(value):
         cp = ord(ch)
-        if 0xD800 <= cp <= 0xDBFF:  # high surrogate
-            if i + 1 >= len(value) or not (0xDC00 <= ord(value[i + 1]) <= 0xDFFF):
-                raise VerificationContextValidationError(
-                    f"unpaired high surrogate at position {i}: {value!r}"
-                )
-        elif 0xDC00 <= cp <= 0xDFFF:  # low surrogate
-            if i == 0 or not (0xD800 <= ord(value[i - 1]) <= 0xDBFF):
-                raise VerificationContextValidationError(
-                    f"unpaired low surrogate at position {i}: {value!r}"
-                )
+        if 0xD800 <= cp <= 0xDFFF:
+            raise VerificationContextValidationError(
+                f"surrogate code point not allowed at position {i}: {value!r}"
+            )
 
 
 def compute_document_proof_ref(document: Mapping[str, Any]) -> str:
@@ -412,7 +410,7 @@ def resolve_document_proof_ref(document: Mapping[str, Any]) -> bool:
         expected = compute_document_proof_ref(document)
         stored = document["context"]["evidence"]["proof_ref"]
         return isinstance(stored, str) and stored == expected
-    except (VerificationContextValidationError, KeyError, TypeError, AttributeError):
+    except (VerificationContextValidationError, KeyError, TypeError, AttributeError, UnicodeError):
         return False
 
 
@@ -437,7 +435,7 @@ def is_valid_document(document: Mapping[str, Any]) -> bool:
             return _is_valid_verified(document, admission, proof_ref)
         return admission == "DENY" and proof_ref is None
 
-    except (VerificationContextValidationError, KeyError, TypeError, AttributeError):
+    except (VerificationContextValidationError, KeyError, TypeError, AttributeError, UnicodeError):
         return False
 
 
@@ -576,6 +574,66 @@ def _is_valid_verified(document: Mapping[str, Any], admission: Optional[str], pr
         return False
     # FAIL-CLOSED: proof_ref must resolve against the document
     return resolve_document_proof_ref(document)
+
+
+def _validate_document_shape(
+    spec_version: str,
+    obj: Dict[str, Any],
+    verdict: Verdict,
+    formalization: Optional[Formalization],
+) -> Any:
+    """Validate static document fields and return the frozen object value."""
+    if formalization is not None and not isinstance(formalization, Formalization):
+        raise VerificationContextValidationError(
+            "formalization must be a Formalization instance or None"
+        )
+    if not isinstance(obj, dict):
+        raise VerificationContextValidationError(
+            "object must be a dict with formal_statement"
+        )
+    if not _is_serializable(obj):
+        raise VerificationContextValidationError(
+            "object contains unsupported non-canonical values"
+        )
+    if spec_version != SPEC_VERSION:
+        raise VerificationContextValidationError(
+            f"spec_version must be {SPEC_VERSION}"
+        )
+    formal_statement = obj.get("formal_statement")
+    if not isinstance(formal_statement, str) or not formal_statement.strip():
+        raise VerificationContextValidationError(
+            "object.formal_statement must be a non-empty string"
+        )
+    if not isinstance(verdict, Verdict):
+        raise VerificationContextValidationError(
+            "verdict must be VERIFIED, UNVERIFIABLE, or BLOCKED"
+        )
+    return _freeze_value(copy.deepcopy(obj))
+
+
+def _validate_document_verdict(verdict: Verdict, context: VerificationContext) -> None:
+    """Validate the verdict/admission/proof_ref contract for the document."""
+    proof_ref = context.evidence.proof_ref
+    if verdict is Verdict.VERIFIED:
+        if proof_ref is None:
+            raise VerificationContextValidationError(
+                "VERIFIED verdict requires context.evidence.proof_ref to be non-null"
+            )
+        if context.decision.admission is Admission.DENY:
+            raise VerificationContextValidationError(
+                "VERIFIED verdict requires ADMIT admission"
+            )
+    else:
+        if proof_ref is not None:
+            raise VerificationContextValidationError(
+                f"{verdict.value} verdict requires proof_ref to be null"
+            )
+        if context.decision.admission is Admission.ADMIT:
+            raise VerificationContextValidationError(
+                f"{verdict.value} verdict requires DENY admission"
+            )
+
+
 @dataclass(frozen=True)
 class VerificationContextDocument:
     spec_version: str
@@ -585,48 +643,17 @@ class VerificationContextDocument:
     formalization: Optional[Formalization] = None
 
     def __post_init__(self) -> None:
-        if self.formalization is not None and not isinstance(self.formalization, Formalization):
-            raise VerificationContextValidationError(
-                "formalization must be a Formalization instance or None"
-            )
-        if not isinstance(self.object, dict):
-            raise VerificationContextValidationError(
-                "object must be a dict with formal_statement"
-            )
-        if not _is_serializable(self.object):
-            raise VerificationContextValidationError(
-                "object contains unsupported non-canonical values"
-            )
-        object.__setattr__(self, 'object', _freeze_value(copy.deepcopy(self.object)))
-        if self.spec_version != SPEC_VERSION:
-            raise VerificationContextValidationError(
-                f"spec_version must be {SPEC_VERSION}"
-            )
-        formal_statement = self.object.get("formal_statement")
-        if not isinstance(formal_statement, str) or not formal_statement.strip():
-            raise VerificationContextValidationError(
-                "object.formal_statement must be a non-empty string"
-            )
-        if not isinstance(self.verdict, Verdict):
-            raise VerificationContextValidationError(
-                "verdict must be VERIFIED, UNVERIFIABLE, or BLOCKED"
-            )
-        if self.verdict is Verdict.VERIFIED and self.context.evidence.proof_ref is None:
-            raise VerificationContextValidationError(
-                "VERIFIED verdict requires context.evidence.proof_ref to be non-null"
-            )
-        if self.verdict is not Verdict.VERIFIED and self.context.evidence.proof_ref is not None:
-            raise VerificationContextValidationError(
-                f"{self.verdict.value} verdict requires proof_ref to be null"
-            )
-        if self.verdict is Verdict.VERIFIED and self.context.decision.admission is Admission.DENY:
-            raise VerificationContextValidationError(
-                "VERIFIED verdict requires ADMIT admission"
-            )
-        if self.verdict is not Verdict.VERIFIED and self.context.decision.admission is Admission.ADMIT:
-            raise VerificationContextValidationError(
-                f"{self.verdict.value} verdict requires DENY admission"
-            )
+        object.__setattr__(
+            self, 'object',
+            _validate_document_shape(self.spec_version, self.object, self.verdict, self.formalization),
+        )
+        _validate_document_verdict(self.verdict, self.context)
+        if self.verdict is Verdict.VERIFIED:
+            if not resolve_document_proof_ref(self.to_dict()):
+                raise VerificationContextValidationError(
+                    "VERIFIED verdict requires context.evidence.proof_ref "
+                    "to bind the document contents"
+                )
 
     def to_dict(self) -> Dict[str, Any]:
         object_dict = _thaw_value(self.object)

@@ -195,20 +195,43 @@ class TestVerificationContext:
 # =============================================================================
 
 class TestVerificationContextDocument:
-    def _doc(self, verdict=Verdict.VERIFIED, proof_ref="sha256:" + "a" * 64):
+    def _build(self, verdict=Verdict.VERIFIED, formal_statement="test claim"):
+        interpretation = Interpretation(theory="Test")
+        proof = Proof(
+            verifier="Test", verifier_version="1.0",
+            configuration={}, theory_scope="test",
+            trusted_dependencies=(), outcome_treatment="fail-closed",
+        )
+        decision = Decision(
+            admission=Admission.ADMIT if verdict is Verdict.VERIFIED else Admission.DENY
+        )
+        context = VerificationContext(
+            interpretation=interpretation,
+            proof=proof,
+            evidence=Evidence(payload={"test": True}, proof_ref=None),
+            decision=decision,
+        )
+        return formal_statement, context
+
+    def _doc(self, verdict=Verdict.VERIFIED, formal_statement="test claim"):
+        formal_statement, context = self._build(verdict, formal_statement)
+        if verdict is Verdict.VERIFIED:
+            ref = compute_document_proof_ref({
+                "spec_version": "1.0",
+                "object": {"formal_statement": formal_statement},
+                "context": context.to_dict(),
+                "verdict": "VERIFIED",
+            })
+            context = VerificationContext(
+                interpretation=context.interpretation,
+                proof=context.proof,
+                evidence=Evidence(payload={"test": True}, proof_ref=ref),
+                decision=context.decision,
+            )
         return VerificationContextDocument(
             spec_version="1.0",
-            object={"formal_statement": "test claim"},
-            context=VerificationContext(
-                interpretation=Interpretation(theory="Test"),
-                proof=Proof(
-                    verifier="Test", verifier_version="1.0",
-                    configuration={}, theory_scope="test",
-                    trusted_dependencies=(), outcome_treatment="fail-closed",
-                ),
-                evidence=Evidence(payload={"test": True}, proof_ref=proof_ref),
-                decision=Decision(admission=Admission.ADMIT),
-            ),
+            object={"formal_statement": formal_statement},
+            context=context,
             verdict=verdict,
         )
 
@@ -217,12 +240,32 @@ class TestVerificationContextDocument:
         assert doc.verdict == Verdict.VERIFIED
         assert doc.context.decision.admission == Admission.ADMIT
 
-    def test_non_formalization_value_rejected(self):
+    def test_unbound_proof_ref_rejected(self):
+        context = VerificationContext(
+            interpretation=Interpretation(theory="Test"),
+            proof=Proof(
+                verifier="Test", verifier_version="1.0",
+                configuration={}, theory_scope="test",
+                trusted_dependencies=(), outcome_treatment="fail-closed",
+            ),
+            evidence=Evidence(payload={"test": True}, proof_ref="sha256:" + "a" * 64),
+            decision=Decision(admission=Admission.ADMIT),
+        )
         with pytest.raises(VerificationContextValidationError):
             VerificationContextDocument(
                 spec_version="1.0",
                 object={"formal_statement": "test claim"},
-                context=self._doc().context,
+                context=context,
+                verdict=Verdict.VERIFIED,
+            )
+
+    def test_non_formalization_value_rejected(self):
+        context = self._build(Verdict.BLOCKED)[1]
+        with pytest.raises(VerificationContextValidationError):
+            VerificationContextDocument(
+                spec_version="1.0",
+                object={"formal_statement": "test claim"},
+                context=context,
                 verdict=Verdict.BLOCKED,
                 formalization="not-a-formalization",
             )
@@ -256,13 +299,20 @@ class TestVerificationContextDocument:
             )
 
     def test_verified_without_proof_ref_rejected(self):
+        formal_statement, context = self._build(Verdict.VERIFIED)
+        context = VerificationContext(
+            interpretation=context.interpretation,
+            proof=context.proof,
+            evidence=Evidence(payload={"test": True}, proof_ref=None),
+            decision=context.decision,
+        )
         with pytest.raises(VerificationContextValidationError):
-            self._doc(verdict=Verdict.VERIFIED, proof_ref=None)
-
-    def test_unverified_with_proof_ref_rejected(self):
-        proof_ref = "sha256:" + "a" * 64
-        with pytest.raises(VerificationContextValidationError):
-            self._doc(verdict=Verdict.UNVERIFIABLE, proof_ref=proof_ref)
+            VerificationContextDocument(
+                spec_version="1.0",
+                object={"formal_statement": formal_statement},
+                context=context,
+                verdict=Verdict.VERIFIED,
+            )
 
     def test_admit_with_unverified_verdict_rejected(self):
         # UNVERIFIABLE verdict requires DENY admission; ADMIT with non-VERIFIED
@@ -393,6 +443,13 @@ class TestIsValidDocument:
         doc = self._full_doc(verdict="VERIFIED", admission="ADMIT", proof_ref=None)
         assert is_valid_document(doc) is False
 
+    def test_verified_surrogate_does_not_raise(self):
+        # A surrogate-bearing VERIFIED document must fail closed (False),
+        # not escape as UnicodeEncodeError during proof_ref hashing.
+        doc = self._full_doc(verdict="VERIFIED", admission="ADMIT", proof_ref="sha256:" + "a" * 64)
+        doc["context"]["interpretation"]["theory"] = "\ud800\udc00"
+        assert is_valid_document(doc) is False
+
     def test_invalid_non_verified_with_proof_ref_rejected(self):
         doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref="sha256:" + "a" * 64)
         assert is_valid_document(doc) is False
@@ -461,6 +518,13 @@ class TestIsValidDocument:
     def test_surrogate_in_theory_rejected(self):
         doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
         doc["context"]["interpretation"]["theory"] = "bad\ud800"
+        assert is_valid_document(doc) is False
+
+    def test_paired_surrogate_in_theory_rejected(self):
+        # Adjacent high+low surrogate code units cannot be UTF-8 encoded for
+        # hashing; they must be rejected fail-closed, not raise UnicodeEncodeError.
+        doc = self._full_doc(verdict="BLOCKED", admission="DENY", proof_ref=None)
+        doc["context"]["interpretation"]["theory"] = "\ud800\udc00"
         assert is_valid_document(doc) is False
 
     def test_surrogate_in_proof_verifier_rejected(self):
