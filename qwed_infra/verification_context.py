@@ -70,10 +70,12 @@ class Formalization:
             raise VerificationContextValidationError(
                 "Formalization.source_query must be a non-empty string"
             )
+        _reject_unpaired_surrogates(self.source_query)
         if not isinstance(self.translator, str) or not self.translator.strip():
             raise VerificationContextValidationError(
                 "Formalization.translator must be a non-empty string"
             )
+        _reject_unpaired_surrogates(self.translator)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -92,10 +94,12 @@ class Interpretation:
             raise VerificationContextValidationError(
                 "Interpretation.theory must be a non-empty string"
             )
+        _reject_unpaired_surrogates(self.theory)
         if not isinstance(self.logic, str) or not self.logic.strip():
             raise VerificationContextValidationError(
                 "Interpretation.logic must be a non-empty string"
             )
+        _reject_unpaired_surrogates(self.logic)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -124,6 +128,7 @@ class Proof:
                 raise VerificationContextValidationError(
                     f"Proof.{field_name} must be a non-empty string"
                 )
+            _reject_unpaired_surrogates(value)
         if not isinstance(self.configuration, dict):
             raise VerificationContextValidationError(
                 "Proof.configuration must be a dict"
@@ -142,6 +147,7 @@ class Proof:
                 raise VerificationContextValidationError(
                     "Proof.trusted_dependencies must contain only non-empty strings"
                 )
+            _reject_unpaired_surrogates(dep)
 
     def to_dict(self) -> Dict[str, Any]:
         return {

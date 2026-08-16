@@ -48,6 +48,10 @@ class TestFormalization:
         with pytest.raises(VerificationContextValidationError):
             Formalization(source_query="test", translator="")
 
+    def test_surrogate_in_source_query_rejected(self):
+        with pytest.raises(VerificationContextValidationError):
+            Formalization(source_query="bad\ud800", translator="TestVerifier")
+
 
 class TestInterpretation:
     def test_valid(self):
@@ -67,6 +71,10 @@ class TestInterpretation:
     def test_empty_logic_rejected(self):
         with pytest.raises(VerificationContextValidationError):
             Interpretation(theory="test", logic="")
+
+    def test_surrogate_in_theory_rejected(self):
+        with pytest.raises(VerificationContextValidationError):
+            Interpretation(theory="bad\ud800")
 
 
 class TestProof:
@@ -761,11 +769,12 @@ class TestBridge:
     def test_malformed_status_blocked_fail_closed(self):
         # Malformed string status ("VERIFIED" as string) must produce BLOCKED
         # as fail-closed protection (no AttributeError through the bridge).
+        original_ref = "sha256:" + "a" * 64
         result = object.__new__(InfraDiagnosticResult)
         object.__setattr__(result, 'status', "VERIFIED")  # string, not enum
         object.__setattr__(result, 'agent_message', "test")
         object.__setattr__(result, 'developer_fields', {"test": 1})
-        object.__setattr__(result, 'proof_ref', "sha256:" + "a" * 64)
+        object.__setattr__(result, 'proof_ref', original_ref)
 
         vc = verification_context_from_diagnostic_result(
             result,
@@ -775,6 +784,8 @@ class TestBridge:
         # Malformed status demotes to BLOCKED, not ADMIT
         assert vc.verdict == Verdict.BLOCKED
         assert vc.context.decision.admission == Admission.DENY
+        # Audit trail preserved: original proof_ref retained in evidence payload
+        assert vc.context.evidence.payload.get("diagnostic_proof_ref") == original_ref
 
     def test_empty_verifier_rejected(self):
         result = self._verified_result()

@@ -63,6 +63,30 @@ def _validate_inputs(result, formal_statement, verifier, attestation_token):
         )
 
 
+def _cast_status_preserving(result):
+    """Return a copy of result with a valid enum status and dict developer_fields.
+
+    Used for the audit-trail evidence path when the input is malformed (e.g. a
+    string status or non-dict developer_fields). The reconstructed result keeps
+    the original proof_ref and (when dict) developer_fields so evidence
+    serialization retains the full diagnostic history.
+    """
+    try:
+        result_status = InfraDiagnosticStatus(result.status)
+    except ValueError:
+        result_status = InfraDiagnosticStatus.BLOCKED
+    dev = getattr(result, 'developer_fields', None)
+    valid_dev = dev if isinstance(dev, dict) else {}
+    if result_status is result.status and valid_dev is dev:
+        return result
+    rebuilt = object.__new__(InfraDiagnosticResult)
+    object.__setattr__(rebuilt, 'status', result_status)
+    object.__setattr__(rebuilt, 'agent_message', getattr(result, 'agent_message', ''))
+    object.__setattr__(rebuilt, 'developer_fields', valid_dev)
+    object.__setattr__(rebuilt, 'proof_ref', getattr(result, 'proof_ref', None))
+    return rebuilt
+
+
 def _normalize_status(result):
     """Cast malformed status to enum; rebuild as BLOCKED if not an enum instance."""
     try:
@@ -89,19 +113,13 @@ def _normalize_developer_fields(result):
 
 
 def _apply_attestation_policy(result, attestation_token):
-    """Demote VERIFIED to UNVERIFIABLE when attestation token is missing.
-
-    Returns (decision_result, evidence_result). The evidence result retains the
-    original diagnostic fields (including proof_ref) so the audit trail is
-    preserved even when the verdict is demoted.
-    """
+    """Demote VERIFIED to UNVERIFIABLE when attestation token is missing."""
     if result.status is InfraDiagnosticStatus.VERIFIED and attestation_token is None:
-        decision_result = InfraDiagnosticResult.unverifiable(
+        return InfraDiagnosticResult.unverifiable(
             agent_message=result.agent_message,
             developer_fields=result.developer_fields,
         )
-        return decision_result, result
-    return result, result
+    return result
 
 
 def _build_evidence_payload(result):
@@ -150,9 +168,10 @@ def verification_context_from_diagnostic_result(
 ) -> VerificationContextDocument:
     _validate_inputs(result, formal_statement, verifier, attestation_token)
 
-    result = _normalize_status(result)
-    result = _normalize_developer_fields(result)
-    decision_result, evidence_result = _apply_attestation_policy(result, attestation_token)
+    evidence_result = _cast_status_preserving(result)
+    decision_result = _normalize_status(result)
+    decision_result = _normalize_developer_fields(decision_result)
+    decision_result = _apply_attestation_policy(decision_result, attestation_token)
 
     interpretation = Interpretation(theory=f"{verifier} verification")
     proof = Proof(
