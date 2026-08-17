@@ -14,7 +14,8 @@ from qwed_infra.audit import (
     IAM_DENY_PRECEDENCE,
     build_trace,
 )
-from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
+from qwed_infra.verification_context import VerificationContextDocument
 
 _IAM_CONSTRAINT_ID = "iam_guard.verify_access"
 
@@ -367,11 +368,25 @@ class IamGuard:
 
     def to_verification_context(
         self,
-        result: "InfraDiagnosticResult",
+        result: InfraDiagnosticResult,
         formal_statement: str,
         attestation_token: Optional[str] = None,
-    ) -> "VerificationContextDocument":
-        """Map an InfraDiagnosticResult to a Verification Context v1.0 document."""
+    ) -> VerificationContextDocument:
+        """Map an InfraDiagnosticResult to a Verification Context v1.0 document.
+
+        A verified IAM denial (allowed=False) must never be admissible: the
+        bridge grants ADMIT to every VERIFIED status, so a proven deny is
+        demoted to BLOCKED (fail-closed) before conversion.
+        """
+        if (
+            result.status is InfraDiagnosticStatus.VERIFIED
+            and result.developer_fields.get("allowed") is False
+        ):
+            result = InfraDiagnosticResult.blocked(
+                agent_message=result.agent_message,
+                developer_fields=result.developer_fields,
+            )
+
         from qwed_infra.verification_context_bridge import (
             verification_context_from_diagnostic_result,
         )

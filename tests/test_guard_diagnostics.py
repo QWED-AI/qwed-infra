@@ -55,13 +55,21 @@ class TestIamGuardToVerificationContext:
         result = VerificationResult(verified=True, allowed=True, proof="Z3 sat")
         return IamGuard.to_diagnostic(result)
 
+    def _denied_diagnostic(self):
+        result = VerificationResult(verified=True, allowed=False, proof="Z3 unsat")
+        return IamGuard.to_diagnostic(result)
+
+    @staticmethod
+    def _attestation_token():
+        return "eyJhbGciOiJIUzI1NiJ9.attestation-signature"
+
     def test_verified_with_attestation(self):
         guard = IamGuard()
         diagnostic = self._verified_diagnostic()
         vc = guard.to_verification_context(
             diagnostic,
             formal_statement="IAM policy is safe to apply",
-            attestation_token="fake-jwt",
+            attestation_token=self._attestation_token(),
         )
         assert vc.verdict == Verdict.VERIFIED
         assert vc.context.decision.admission == Admission.ADMIT
@@ -70,6 +78,34 @@ class TestIamGuardToVerificationContext:
         doc_dict = vc.to_dict()
         assert is_valid_document(doc_dict) is True
         assert resolve_document_proof_ref(doc_dict) is True
+
+    def test_verified_denial_never_admissible(self):
+        guard = IamGuard()
+        diagnostic = self._denied_diagnostic()
+        assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["allowed"] is False
+        assert payload["developer_fields"]["proof"] == "Z3 unsat"
+
+    def test_verified_denial_without_attestation(self):
+        guard = IamGuard()
+        diagnostic = self._denied_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
 
     def test_verified_without_attestation_demoted(self):
         guard = IamGuard()
@@ -122,7 +158,7 @@ class TestIamGuardToVerificationContext:
         vc = guard.to_verification_context(
             diagnostic,
             formal_statement="IAM policy is safe to apply",
-            attestation_token="fake-jwt",
+            attestation_token=self._attestation_token(),
         )
         assert vc.context.decision.admission is Admission.ADMIT
         assert diagnostic.is_verified is True
@@ -133,14 +169,23 @@ class TestIamGuardToVerificationContext:
         vc = guard.to_verification_context(
             diagnostic,
             formal_statement="IAM policy is safe to apply",
-            attestation_token="fake-jwt",
+            attestation_token=self._attestation_token(),
         )
         payload = vc.context.evidence.payload
         assert payload["developer_fields"]["constraint_id"] == "iam_guard.verify_access"
         assert payload["developer_fields"]["allowed"] is True
         assert payload["developer_fields"]["audit_trace"]["rule_id"] == "IAM_DENY_PRECEDENCE"
 
-    def test_empty_formal_statement_rejected(self):
+    @pytest.mark.parametrize(
+        "formal_statement",
+        [
+            "",
+            "   \n\t ",
+            123,
+            None,
+        ],
+    )
+    def test_invalid_formal_statement_rejected(self, formal_statement):
         from qwed_infra.verification_context import VerificationContextValidationError
 
         guard = IamGuard()
@@ -148,8 +193,8 @@ class TestIamGuardToVerificationContext:
         with pytest.raises(VerificationContextValidationError):
             guard.to_verification_context(
                 diagnostic,
-                formal_statement="",
-                attestation_token="fake-jwt",
+                formal_statement=formal_statement,
+                attestation_token=self._attestation_token(),
             )
 
     def test_existing_to_diagnostic_still_passes(self):
