@@ -863,6 +863,16 @@ class TestBridge:
                 decision_status="blocked",
             )
 
+    def test_decision_status_override_rejects_verified(self):
+        result = self._verified_result()
+        with pytest.raises(VerificationContextValidationError):
+            verification_context_from_diagnostic_result(
+                result,
+                formal_statement="test claim",
+                verifier="IamGuard",
+                decision_status=InfraDiagnosticStatus.VERIFIED,
+            )
+
     def test_empty_formal_statement_rejected(self):
         result = self._verified_result()
         with pytest.raises(VerificationContextValidationError):

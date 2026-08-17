@@ -169,12 +169,16 @@ def verification_context_from_diagnostic_result(
     decision_status: Optional[InfraDiagnosticStatus] = None,
 ) -> VerificationContextDocument:
     _validate_inputs(result, formal_statement, verifier, attestation_token)
-    if decision_status is not None and not isinstance(
-        decision_status, InfraDiagnosticStatus
-    ):
-        raise VerificationContextValidationError(
-            "decision_status must be an InfraDiagnosticStatus or None"
-        )
+    if decision_status is not None:
+        if not isinstance(decision_status, InfraDiagnosticStatus):
+            raise VerificationContextValidationError(
+                "decision_status must be an InfraDiagnosticStatus or None"
+            )
+        if decision_status is InfraDiagnosticStatus.VERIFIED:
+            raise VerificationContextValidationError(
+                "decision_status must be a fail-closed status "
+                "(UNVERIFIABLE or BLOCKED); VERIFIED is the default path"
+            )
 
     evidence_result = _cast_status_preserving(result)
     decision_result = _normalize_status(result)
