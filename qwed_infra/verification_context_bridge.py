@@ -8,6 +8,7 @@ Mirrors qwed-verification/src/qwed_new/core/verification_context_bridge.py.
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from importlib.metadata import PackageNotFoundError, version
 from typing import Optional
 
@@ -165,12 +166,27 @@ def verification_context_from_diagnostic_result(
     verifier: str,
     verifier_version: Optional[str] = None,
     attestation_token: Optional[str] = None,
+    decision_status: Optional[InfraDiagnosticStatus] = None,
 ) -> VerificationContextDocument:
     _validate_inputs(result, formal_statement, verifier, attestation_token)
+    if decision_status is not None and not isinstance(
+        decision_status, InfraDiagnosticStatus
+    ):
+        raise VerificationContextValidationError(
+            "decision_status must be an InfraDiagnosticStatus or None"
+        )
 
     evidence_result = _cast_status_preserving(result)
     decision_result = _normalize_status(result)
     decision_result = _normalize_developer_fields(decision_result)
+    if decision_status is not None:
+        # Fail-closed decision override: evidence keeps the authoritative
+        # diagnostic (status + proof_ref), decision derives from decision_status.
+        decision_result = replace(
+            decision_result,
+            status=decision_status,
+            proof_ref=None,
+        )
     decision_result = _apply_attestation_policy(decision_result, attestation_token)
 
     interpretation = Interpretation(theory=f"{verifier} verification")

@@ -376,16 +376,16 @@ class IamGuard:
 
         A verified IAM denial (allowed=False) must never be admissible: the
         bridge grants ADMIT to every VERIFIED status, so a proven deny is
-        demoted to BLOCKED (fail-closed) before conversion.
+        demoted to BLOCKED (fail-closed) via the decision override. The
+        evidence keeps the authoritative VERIFIED status and proof_ref so the
+        audit trail preserves the formal proof provenance.
         """
+        decision_status = None
         if (
             result.status is InfraDiagnosticStatus.VERIFIED
             and result.developer_fields.get("allowed") is False
         ):
-            result = InfraDiagnosticResult.blocked(
-                agent_message=result.agent_message,
-                developer_fields=result.developer_fields,
-            )
+            decision_status = InfraDiagnosticStatus.BLOCKED
 
         from qwed_infra.verification_context_bridge import (
             verification_context_from_diagnostic_result,
@@ -396,6 +396,7 @@ class IamGuard:
             formal_statement=formal_statement,
             attestation_token=attestation_token,
             verifier="IamGuard",
+            decision_status=decision_status,
         )
 
 

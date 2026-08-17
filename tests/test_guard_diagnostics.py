@@ -83,6 +83,7 @@ class TestIamGuardToVerificationContext:
         guard = IamGuard()
         diagnostic = self._denied_diagnostic()
         assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
+        original_proof_ref = diagnostic.proof_ref
         vc = guard.to_verification_context(
             diagnostic,
             formal_statement="IAM policy is safe to apply",
@@ -95,6 +96,7 @@ class TestIamGuardToVerificationContext:
         payload = vc.context.evidence.payload
         assert payload["developer_fields"]["allowed"] is False
         assert payload["developer_fields"]["proof"] == "Z3 unsat"
+        assert payload["diagnostic_proof_ref"] == original_proof_ref
 
     def test_verified_denial_without_attestation(self):
         guard = IamGuard()
@@ -190,11 +192,12 @@ class TestIamGuardToVerificationContext:
 
         guard = IamGuard()
         diagnostic = self._verified_diagnostic()
+        attestation_token = self._attestation_token()
         with pytest.raises(VerificationContextValidationError):
             guard.to_verification_context(
                 diagnostic,
                 formal_statement=formal_statement,
-                attestation_token=self._attestation_token(),
+                attestation_token=attestation_token,
             )
 
     def test_existing_to_diagnostic_still_passes(self):
