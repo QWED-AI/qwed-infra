@@ -836,6 +836,43 @@ class TestBridge:
         assert vc.context.decision.admission == Admission.DENY
         assert vc.context.evidence.proof_ref is None
 
+    def test_decision_status_override_preserves_evidence(self):
+        result = self._verified_result()
+        vc = verification_context_from_diagnostic_result(
+            result,
+            formal_statement="test claim",
+            verifier="IamGuard",
+            attestation_token="fake-jwt",
+            decision_status=InfraDiagnosticStatus.BLOCKED,
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["status"] == "VERIFIED"
+        assert payload["diagnostic_proof_ref"] == result.proof_ref
+        assert is_valid_document(vc.to_dict()) is True
+
+    def test_decision_status_override_rejects_malformed_value(self):
+        result = self._verified_result()
+        with pytest.raises(VerificationContextValidationError):
+            verification_context_from_diagnostic_result(
+                result,
+                formal_statement="test claim",
+                verifier="IamGuard",
+                decision_status="blocked",
+            )
+
+    def test_decision_status_override_rejects_verified(self):
+        result = self._verified_result()
+        with pytest.raises(VerificationContextValidationError):
+            verification_context_from_diagnostic_result(
+                result,
+                formal_statement="test claim",
+                verifier="IamGuard",
+                decision_status=InfraDiagnosticStatus.VERIFIED,
+            )
+
     def test_empty_formal_statement_rejected(self):
         result = self._verified_result()
         with pytest.raises(VerificationContextValidationError):
