@@ -13,6 +13,7 @@ from qwed_infra.audit import (
     build_trace,
 )
 from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.verification_context import VerificationContextDocument
 
 _NETWORK_CONSTRAINT_ID = "network_guard.verify_reachability"
 
@@ -272,4 +273,27 @@ class NetworkGuard:
                 "failure_code": result.failure_code,
                 "audit_trace": trace,
             },
+        )
+
+    def to_verification_context(
+        self,
+        result: InfraDiagnosticResult,
+        formal_statement: str,
+        attestation_token: Optional[str] = None,
+    ) -> VerificationContextDocument:
+        """Map an InfraDiagnosticResult to a Verification Context v1.0 document.
+
+        NetworkGuard's diagnostics are already fail-closed: only a reachable
+        path is VERIFIED, every failure mode is UNVERIFIABLE or BLOCKED, so no
+        decision override is required.
+        """
+        from qwed_infra.verification_context_bridge import (
+            verification_context_from_diagnostic_result,
+        )
+
+        return verification_context_from_diagnostic_result(
+            result,
+            formal_statement=formal_statement,
+            attestation_token=attestation_token,
+            verifier="NetworkGuard",
         )

@@ -267,6 +267,154 @@ class TestNetworkGuardToDiagnostic:
         assert diagnostic.developer_fields["audit_trace"]["rule_id"] == "NETWORK_UNKNOWN_DEST"
 
 
+class TestNetworkGuardToVerificationContext:
+    def _reachable_diagnostic(self):
+        result = ComputedPath(
+            reachable=True,
+            path=["internet", "subnet-a"],
+            reason="Route exists and Security Groups allow traffic",
+        )
+        return NetworkGuard.to_diagnostic(result)
+
+    def _blocked_diagnostic(self, failure_code, reason):
+        result = ComputedPath(
+            reachable=False,
+            path=[],
+            reason=reason,
+            failure_code=failure_code,
+        )
+        return NetworkGuard.to_diagnostic(result)
+
+    def _unsupported_topology_diagnostic(self):
+        result = ComputedPath(
+            reachable=False,
+            path=[],
+            port=80,
+            reason="Topology contains unsupported constructs — cannot verify",
+            failure_code="unsupported_topology",
+            unsupported_topology=True,
+        )
+        return NetworkGuard.to_diagnostic(result)
+
+    @staticmethod
+    def _attestation_token():
+        return "eyJhbGciOiJIUzI1NiJ9.attestation-signature"
+
+    def test_reachable_with_attestation(self):
+        guard = NetworkGuard()
+        diagnostic = self._reachable_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.VERIFIED
+        assert vc.context.decision.admission == Admission.ADMIT
+        assert vc.context.evidence.proof_ref.startswith("sha256:")
+        assert len(vc.context.evidence.proof_ref) == 71
+        doc_dict = vc.to_dict()
+        assert is_valid_document(doc_dict) is True
+        assert resolve_document_proof_ref(doc_dict) is True
+
+    def test_reachable_without_attestation_demoted(self):
+        guard = NetworkGuard()
+        diagnostic = self._reachable_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+        )
+        assert vc.verdict == Verdict.UNVERIFIABLE
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    @pytest.mark.parametrize(
+        "failure_code,reason,rule_id",
+        [
+            ("sg_ingress_blocked", "Security Group blocks port 80", "NETWORK_SG_INGRESS"),
+            ("no_route", "No Route exists between nodes", "NETWORK_NO_ROUTE"),
+            ("invalid_internal_source", "Invalid internal source: 'not-an-ip'", "NETWORK_INVALID_INTERNAL"),
+            ("unknown_destination", "Destination not found", "NETWORK_UNKNOWN_DEST"),
+        ],
+    )
+    def test_fail_closed_never_admissible(self, failure_code, reason, rule_id):
+        guard = NetworkGuard()
+        diagnostic = self._blocked_diagnostic(failure_code, reason)
+        assert diagnostic.status is InfraDiagnosticStatus.BLOCKED
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["failure_code"] == failure_code
+        assert payload["developer_fields"]["audit_trace"]["rule_id"] == rule_id
+
+    def test_unsupported_topology_fail_closed(self):
+        guard = NetworkGuard()
+        diagnostic = self._unsupported_topology_diagnostic()
+        assert diagnostic.status is InfraDiagnosticStatus.UNVERIFIABLE
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.UNVERIFIABLE
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        assert vc.context.evidence.payload["developer_fields"]["unsupported_topology"] is True
+
+    def test_evidence_preserves_diagnostic_fields(self):
+        guard = NetworkGuard()
+        diagnostic = self._reachable_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+            attestation_token=self._attestation_token(),
+        )
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["constraint_id"] == "network_guard.verify_reachability"
+        assert payload["developer_fields"]["reachable"] is True
+        assert payload["developer_fields"]["path"] == ("internet", "subnet-a")
+
+    @pytest.mark.parametrize(
+        "formal_statement",
+        [
+            "",
+            "   \n\t ",
+            123,
+            None,
+        ],
+    )
+    def test_invalid_formal_statement_rejected(self, formal_statement):
+        from qwed_infra.verification_context import VerificationContextValidationError
+
+        guard = NetworkGuard()
+        diagnostic = self._reachable_diagnostic()
+        attestation_token = self._attestation_token()
+        with pytest.raises(VerificationContextValidationError):
+            guard.to_verification_context(
+                diagnostic,
+                formal_statement=formal_statement,
+                attestation_token=attestation_token,
+            )
+
+    def test_existing_to_diagnostic_still_passes(self):
+        result = ComputedPath(
+            reachable=True,
+            path=["internet", "subnet-a"],
+            reason="Route exists and Security Groups allow traffic",
+        )
+        diagnostic = NetworkGuard.to_diagnostic(result)
+        assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
+        assert diagnostic.proof_ref is not None
+
+
 class TestCostGuardToDiagnostic:
     def test_within_budget(self):
         result = CostEstimate(
