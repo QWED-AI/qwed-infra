@@ -1,9 +1,15 @@
 import pydantic
 import pytest
-from qwed_infra.diagnostics import InfraDiagnosticStatus
+from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 from qwed_infra.guards.iam_guard import IamGuard, VerificationResult
 from qwed_infra.guards.network_guard import ComputedPath, NetworkGuard
 from qwed_infra.guards.cost_guard import CostEstimate, CostGuard
+from qwed_infra.verification_context import (
+    Admission,
+    Verdict,
+    is_valid_document,
+    resolve_document_proof_ref,
+)
 
 
 class TestIamGuardToDiagnostic:
@@ -42,6 +48,115 @@ class TestIamGuardToDiagnostic:
         diagnostic = IamGuard.to_diagnostic(result, audit_trace=trace)
         assert diagnostic.developer_fields["audit_trace"] == trace
         assert diagnostic.audit_trace == trace
+
+
+class TestIamGuardToVerificationContext:
+    def _verified_diagnostic(self):
+        result = VerificationResult(verified=True, allowed=True, proof="Z3 sat")
+        return IamGuard.to_diagnostic(result)
+
+    def test_verified_with_attestation(self):
+        guard = IamGuard()
+        diagnostic = self._verified_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+            attestation_token="fake-jwt",
+        )
+        assert vc.verdict == Verdict.VERIFIED
+        assert vc.context.decision.admission == Admission.ADMIT
+        assert vc.context.evidence.proof_ref.startswith("sha256:")
+        assert len(vc.context.evidence.proof_ref) == 71
+        doc_dict = vc.to_dict()
+        assert is_valid_document(doc_dict) is True
+        assert resolve_document_proof_ref(doc_dict) is True
+
+    def test_verified_without_attestation_demoted(self):
+        guard = IamGuard()
+        diagnostic = self._verified_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+        )
+        assert vc.verdict == Verdict.UNVERIFIABLE
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        doc_dict = vc.to_dict()
+        assert is_valid_document(doc_dict) is True
+
+    def test_unverifiable(self):
+        guard = IamGuard()
+        result = VerificationResult(
+            verified=False,
+            allowed=False,
+            error="Solver failed",
+        )
+        diagnostic = IamGuard.to_diagnostic(result)
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+        )
+        assert vc.verdict == Verdict.UNVERIFIABLE
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    def test_blocked(self):
+        guard = IamGuard()
+        diagnostic = InfraDiagnosticResult.blocked(
+            agent_message="blocked by policy",
+            developer_fields={"constraint_id": "iam_guard.blocked", "reason": "explicit deny"},
+        )
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    def test_admission_matches_diagnostic(self):
+        guard = IamGuard()
+        diagnostic = self._verified_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+            attestation_token="fake-jwt",
+        )
+        assert vc.context.decision.admission is Admission.ADMIT
+        assert diagnostic.is_verified is True
+
+    def test_evidence_preserves_diagnostic_fields(self):
+        guard = IamGuard()
+        diagnostic = self._verified_diagnostic()
+        vc = guard.to_verification_context(
+            diagnostic,
+            formal_statement="IAM policy is safe to apply",
+            attestation_token="fake-jwt",
+        )
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["constraint_id"] == "iam_guard.verify_access"
+        assert payload["developer_fields"]["allowed"] is True
+        assert payload["developer_fields"]["audit_trace"]["rule_id"] == "IAM_DENY_PRECEDENCE"
+
+    def test_empty_formal_statement_rejected(self):
+        from qwed_infra.verification_context import VerificationContextValidationError
+
+        guard = IamGuard()
+        diagnostic = self._verified_diagnostic()
+        with pytest.raises(VerificationContextValidationError):
+            guard.to_verification_context(
+                diagnostic,
+                formal_statement="",
+                attestation_token="fake-jwt",
+            )
+
+    def test_existing_to_diagnostic_still_passes(self):
+        result = VerificationResult(verified=True, allowed=True, proof="Z3 sat")
+        diagnostic = IamGuard.to_diagnostic(result)
+        assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
+        assert diagnostic.proof_ref is not None
 
 
 class TestNetworkGuardToDiagnostic:

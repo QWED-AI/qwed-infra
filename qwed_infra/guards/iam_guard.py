@@ -365,4 +365,22 @@ class IamGuard:
             evidence=evidence,
         )
 
+    def to_verification_context(
+        self,
+        result: "InfraDiagnosticResult",
+        formal_statement: str,
+        attestation_token: Optional[str] = None,
+    ) -> "VerificationContextDocument":
+        """Map an InfraDiagnosticResult to a Verification Context v1.0 document."""
+        from qwed_infra.verification_context_bridge import (
+            verification_context_from_diagnostic_result,
+        )
+
+        return verification_context_from_diagnostic_result(
+            result,
+            formal_statement=formal_statement,
+            attestation_token=attestation_token,
+            verifier="IamGuard",
+        )
+
 
