@@ -61,7 +61,7 @@ class TestIamGuardToVerificationContext:
 
     @staticmethod
     def _attestation_token():
-        return "eyJhbGciOiJIUzI1NiJ9.attestation-signature"
+        return "attestation-fixture-opaque"
 
     def test_verified_with_attestation(self):
         guard = IamGuard()
@@ -298,7 +298,7 @@ class TestNetworkGuardToVerificationContext:
 
     @staticmethod
     def _attestation_token():
-        return "eyJhbGciOiJIUzI1NiJ9.attestation-signature"
+        return "attestation-fixture-opaque"
 
     def test_reachable_with_attestation(self):
         guard = NetworkGuard()
