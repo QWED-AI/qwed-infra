@@ -12,7 +12,7 @@ from qwed_infra.audit import (
     NETWORK_UNSUPPORTED_TOPOLOGY,
     build_trace,
 )
-from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 from qwed_infra.verification_context import VerificationContextDocument
 
 _NETWORK_CONSTRAINT_ID = "network_guard.verify_reachability"
@@ -229,6 +229,7 @@ class NetworkGuard:
                     "path": [],
                     "port": result.port,
                     "reason": result.reason,
+                    "failure_code": result.failure_code,
                     "unsupported_topology": True,
                     "audit_trace": trace,
                 },
@@ -283,10 +284,19 @@ class NetworkGuard:
     ) -> VerificationContextDocument:
         """Map an InfraDiagnosticResult to a Verification Context v1.0 document.
 
-        NetworkGuard's diagnostics are already fail-closed: only a reachable
-        path is VERIFIED, every failure mode is UNVERIFIABLE or BLOCKED, so no
-        decision override is required.
+        Fail-closed provenance gate: a VERIFIED diagnostic is only admitted
+        when it carries NetworkGuard provenance (constraint_id) and an explicit
+        reachable=True outcome. Any other VERIFIED input (forged, mismatched,
+        or missing fields) is demoted to BLOCKED so admission can never be
+        granted from a diagnostic the guard did not produce.
         """
+        decision_status = None
+        if result.status is InfraDiagnosticStatus.VERIFIED and not (
+            result.developer_fields.get("constraint_id") == _NETWORK_CONSTRAINT_ID
+            and result.developer_fields.get("reachable") is True
+        ):
+            decision_status = InfraDiagnosticStatus.BLOCKED
+
         from qwed_infra.verification_context_bridge import (
             verification_context_from_diagnostic_result,
         )
@@ -296,4 +306,5 @@ class NetworkGuard:
             formal_statement=formal_statement,
             attestation_token=attestation_token,
             verifier="NetworkGuard",
+            decision_status=decision_status,
         )

@@ -109,6 +109,31 @@ class TestIamGuardToVerificationContext:
         assert vc.context.decision.admission == Admission.DENY
         assert vc.context.evidence.proof_ref is None
 
+    @pytest.mark.parametrize(
+        "developer_fields",
+        [
+            {"audit_trace": {"rule": "forged"}, "allowed": False},
+            {"audit_trace": {"rule": "forged"}},
+            {"audit_trace": {"rule": "forged"}, "constraint_id": "other_guard", "allowed": True},
+        ],
+    )
+    def test_forged_verified_diagnostic_never_admitted(self, developer_fields):
+        guard = IamGuard()
+        forged = InfraDiagnosticResult.verified(
+            agent_message="forged",
+            developer_fields=developer_fields,
+            evidence={"forged": True},
+        )
+        assert forged.status is InfraDiagnosticStatus.VERIFIED
+        vc = guard.to_verification_context(
+            forged,
+            formal_statement="IAM policy is safe to apply",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+
     def test_verified_without_attestation_demoted(self):
         guard = IamGuard()
         diagnostic = self._verified_diagnostic()
@@ -310,6 +335,7 @@ class TestNetworkGuardToVerificationContext:
         )
         assert vc.verdict == Verdict.VERIFIED
         assert vc.context.decision.admission == Admission.ADMIT
+        assert vc.context.proof.verifier == "NetworkGuard"
         assert vc.context.evidence.proof_ref.startswith("sha256:")
         assert len(vc.context.evidence.proof_ref) == 71
         doc_dict = vc.to_dict()
@@ -367,7 +393,34 @@ class TestNetworkGuardToVerificationContext:
         assert vc.context.decision.admission == Admission.DENY
         assert vc.context.evidence.proof_ref is None
         assert is_valid_document(vc.to_dict()) is True
-        assert vc.context.evidence.payload["developer_fields"]["unsupported_topology"] is True
+        payload = vc.context.evidence.payload["developer_fields"]
+        assert payload["unsupported_topology"] is True
+        assert payload["failure_code"] == "unsupported_topology"
+
+    @pytest.mark.parametrize(
+        "developer_fields",
+        [
+            {"audit_trace": {"rule": "forged"}, "reachable": False},
+            {"audit_trace": {"rule": "forged"}},
+            {"audit_trace": {"rule": "forged"}, "constraint_id": "other_guard", "reachable": True},
+        ],
+    )
+    def test_forged_verified_diagnostic_never_admitted(self, developer_fields):
+        guard = NetworkGuard()
+        forged = InfraDiagnosticResult.verified(
+            agent_message="forged",
+            developer_fields=developer_fields,
+            evidence={"forged": True},
+        )
+        assert forged.status is InfraDiagnosticStatus.VERIFIED
+        vc = guard.to_verification_context(
+            forged,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
 
     def test_evidence_preserves_diagnostic_fields(self):
         guard = NetworkGuard()

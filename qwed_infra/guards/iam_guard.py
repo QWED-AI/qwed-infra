@@ -374,16 +374,16 @@ class IamGuard:
     ) -> VerificationContextDocument:
         """Map an InfraDiagnosticResult to a Verification Context v1.0 document.
 
-        A verified IAM denial (allowed=False) must never be admissible: the
-        bridge grants ADMIT to every VERIFIED status, so a proven deny is
-        demoted to BLOCKED (fail-closed) via the decision override. The
-        evidence keeps the authoritative VERIFIED status and proof_ref so the
-        audit trail preserves the formal proof provenance.
+        Fail-closed provenance gate: a VERIFIED diagnostic is only admitted
+        when it carries IamGuard provenance (constraint_id) and an explicit
+        allowed=True outcome. A proven denial, or any other VERIFIED input
+        (forged, mismatched, or missing fields), is demoted to BLOCKED so a
+        denied or non-IAM result can never be admissible.
         """
         decision_status = None
-        if (
-            result.status is InfraDiagnosticStatus.VERIFIED
-            and result.developer_fields.get("allowed") is False
+        if result.status is InfraDiagnosticStatus.VERIFIED and not (
+            result.developer_fields.get("constraint_id") == _IAM_CONSTRAINT_ID
+            and result.developer_fields.get("allowed") is True
         ):
             decision_status = InfraDiagnosticStatus.BLOCKED
 
