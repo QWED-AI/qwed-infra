@@ -278,23 +278,23 @@ class NetworkGuard:
 
     def to_verification_context(
         self,
-        result: ComputedPath,
+        resources: Dict[str, Any],
+        source: str,
+        destination: str,
+        port: int,
+        *,
         formal_statement: str,
         attestation_token: Optional[str] = None,
     ) -> VerificationContextDocument:
-        """Map a ComputedPath to a Verification Context v1.0 document.
+        """Run the reachability check and map the result to a VC v1.0 document.
 
-        The diagnostic is derived inside the guard via to_diagnostic(), so a
-        caller cannot inject a forged InfraDiagnosticResult into the bridge.
-        The provenance gate remains as defense-in-depth: only a VERIFIED
+        The guard performs the computation itself via verify_reachability(),
+        so a caller cannot inject a result object of any kind. The
+        provenance gate remains as defense-in-depth: only a VERIFIED
         diagnostic carrying NetworkGuard provenance and an explicit
         reachable=True outcome is admitted; anything else is BLOCKED.
         """
-        if not isinstance(result, ComputedPath):
-            raise TypeError(
-                f"result must be a ComputedPath, got {type(result).__name__}"
-            )
-
+        result = self.verify_reachability(resources, source, destination, port)
         diagnostic = self.to_diagnostic(result)
         decision_status = None
         if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (

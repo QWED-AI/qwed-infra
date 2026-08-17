@@ -368,23 +368,23 @@ class IamGuard:
 
     def to_verification_context(
         self,
-        result: VerificationResult,
+        policy: Dict[str, Any],
+        action: str,
+        resource: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
         formal_statement: str,
         attestation_token: Optional[str] = None,
     ) -> VerificationContextDocument:
-        """Map a VerificationResult to a Verification Context v1.0 document.
+        """Run the access check and map the result to a VC v1.0 document.
 
-        The diagnostic is derived inside the guard via to_diagnostic(), so a
-        caller cannot inject a forged InfraDiagnosticResult into the bridge.
-        The provenance gate remains as defense-in-depth: only a VERIFIED
-        diagnostic carrying IamGuard provenance and an explicit allowed=True
-        outcome is admitted; a proven denial or any other result is BLOCKED.
+        The guard performs the computation itself via verify_access(), so a
+        caller cannot inject a result object of any kind. The provenance
+        gate remains as defense-in-depth: only a VERIFIED diagnostic
+        carrying IamGuard provenance and an explicit allowed=True outcome is
+        admitted; a proven denial or any other result is BLOCKED.
         """
-        if not isinstance(result, VerificationResult):
-            raise TypeError(
-                f"result must be a VerificationResult, got {type(result).__name__}"
-            )
-
+        result = self.verify_access(policy, action, resource, context)
         diagnostic = IamGuard.to_diagnostic(result)
         decision_status = None
         if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (

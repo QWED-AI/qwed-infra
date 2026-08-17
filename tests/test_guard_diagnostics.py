@@ -1,6 +1,6 @@
 import pydantic
 import pytest
-from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
+from qwed_infra.diagnostics import InfraDiagnosticStatus
 from qwed_infra.guards.iam_guard import IamGuard, VerificationResult
 from qwed_infra.guards.network_guard import ComputedPath, NetworkGuard
 from qwed_infra.guards.cost_guard import CostEstimate, CostGuard
@@ -52,12 +52,23 @@ class TestIamGuardToDiagnostic:
 
 class TestIamGuardToVerificationContext:
     @staticmethod
-    def _verified_result():
-        return VerificationResult(verified=True, allowed=True, proof="Z3 sat")
+    def _allow_policy():
+        return {
+            "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+        }
 
     @staticmethod
-    def _denied_result():
-        return VerificationResult(verified=True, allowed=False, proof="Z3 unsat")
+    def _deny_policy():
+        return {
+            "Statement": [
+                {"Effect": "Allow", "Action": "*", "Resource": "*"},
+                {"Effect": "Deny", "Action": "s3:DeleteBucket", "Resource": "*"},
+            ]
+        }
+
+    @staticmethod
+    def _unverifiable_policy():
+        return {"Statement": [{"Effect": "Allow", "Action": 123, "Resource": "*"}]}
 
     @staticmethod
     def _attestation_token():
@@ -66,7 +77,9 @@ class TestIamGuardToVerificationContext:
     def test_verified_with_attestation(self):
         guard = IamGuard()
         vc = guard.to_verification_context(
-            self._verified_result(),
+            self._allow_policy(),
+            "s3:GetObject",
+            "*",
             formal_statement="IAM policy is safe to apply",
             attestation_token=self._attestation_token(),
         )
@@ -81,12 +94,16 @@ class TestIamGuardToVerificationContext:
 
     def test_verified_denial_never_admissible(self):
         guard = IamGuard()
-        result = self._denied_result()
+        result = guard.verify_access(self._deny_policy(), "s3:DeleteBucket", "*")
+        assert result.verified is True
+        assert result.allowed is False
         diagnostic = IamGuard.to_diagnostic(result)
         assert diagnostic.status is InfraDiagnosticStatus.VERIFIED
         original_proof_ref = diagnostic.proof_ref
         vc = guard.to_verification_context(
-            result,
+            self._deny_policy(),
+            "s3:DeleteBucket",
+            "*",
             formal_statement="IAM policy is safe to apply",
             attestation_token=self._attestation_token(),
         )
@@ -96,41 +113,27 @@ class TestIamGuardToVerificationContext:
         assert is_valid_document(vc.to_dict()) is True
         payload = vc.context.evidence.payload
         assert payload["developer_fields"]["allowed"] is False
-        assert payload["developer_fields"]["proof"] == "Z3 unsat"
+        assert payload["developer_fields"]["proof"] == "Z3 proved unsatisfiability (Access Denied)"
         assert payload["diagnostic_proof_ref"] == original_proof_ref
 
     def test_verified_denial_without_attestation(self):
         guard = IamGuard()
         vc = guard.to_verification_context(
-            self._denied_result(),
+            self._deny_policy(),
+            "s3:DeleteBucket",
+            "*",
             formal_statement="IAM policy is safe to apply",
         )
         assert vc.verdict == Verdict.BLOCKED
         assert vc.context.decision.admission == Admission.DENY
         assert vc.context.evidence.proof_ref is None
 
-    def test_diagnostic_input_rejected(self):
-        guard = IamGuard()
-        forged = InfraDiagnosticResult.verified(
-            agent_message="forged",
-            developer_fields={
-                "constraint_id": "iam_guard.verify_access",
-                "allowed": True,
-                "audit_trace": {"rule": "forged"},
-            },
-            evidence={"forged": True},
-        )
-        with pytest.raises(TypeError):
-            guard.to_verification_context(
-                forged,
-                formal_statement="IAM policy is safe to apply",
-                attestation_token=self._attestation_token(),
-            )
-
     def test_verified_without_attestation_demoted(self):
         guard = IamGuard()
         vc = guard.to_verification_context(
-            self._verified_result(),
+            self._allow_policy(),
+            "s3:GetObject",
+            "*",
             formal_statement="IAM policy is safe to apply",
         )
         assert vc.verdict == Verdict.UNVERIFIABLE
@@ -141,13 +144,12 @@ class TestIamGuardToVerificationContext:
 
     def test_unverifiable(self):
         guard = IamGuard()
-        result = VerificationResult(
-            verified=False,
-            allowed=False,
-            error="Solver failed",
-        )
+        result = guard.verify_access(self._unverifiable_policy(), "s3:GetObject", "*")
+        assert result.verified is False
         vc = guard.to_verification_context(
-            result,
+            self._unverifiable_policy(),
+            "s3:GetObject",
+            "*",
             formal_statement="IAM policy is safe to apply",
         )
         assert vc.verdict == Verdict.UNVERIFIABLE
@@ -157,19 +159,24 @@ class TestIamGuardToVerificationContext:
 
     def test_admission_matches_diagnostic(self):
         guard = IamGuard()
-        result = self._verified_result()
         vc = guard.to_verification_context(
-            result,
+            self._allow_policy(),
+            "s3:GetObject",
+            "*",
             formal_statement="IAM policy is safe to apply",
             attestation_token=self._attestation_token(),
         )
         assert vc.context.decision.admission is Admission.ADMIT
-        assert IamGuard.to_diagnostic(result).is_verified is True
+        assert IamGuard.to_diagnostic(
+            guard.verify_access(self._allow_policy(), "s3:GetObject", "*")
+        ).is_verified is True
 
     def test_evidence_preserves_diagnostic_fields(self):
         guard = IamGuard()
         vc = guard.to_verification_context(
-            self._verified_result(),
+            self._allow_policy(),
+            "s3:GetObject",
+            "*",
             formal_statement="IAM policy is safe to apply",
             attestation_token=self._attestation_token(),
         )
@@ -194,7 +201,9 @@ class TestIamGuardToVerificationContext:
         attestation_token = self._attestation_token()
         with pytest.raises(VerificationContextValidationError):
             guard.to_verification_context(
-                self._verified_result(),
+                self._allow_policy(),
+                "s3:GetObject",
+                "*",
                 formal_statement=formal_statement,
                 attestation_token=attestation_token,
             )
@@ -268,32 +277,32 @@ class TestNetworkGuardToDiagnostic:
 
 class TestNetworkGuardToVerificationContext:
     @staticmethod
-    def _reachable_result():
-        return ComputedPath(
-            reachable=True,
-            path=["internet", "subnet-a"],
-            reason="Route exists and Security Groups allow traffic",
-        )
+    def _reachable_resources():
+        return {
+            "subnets": [{"id": "subnet-a", "security_groups": ["sg-allow-http"]}],
+            "route_tables": [
+                {"subnet_id": "subnet-a", "routes": {"0.0.0.0/0": "igw-123"}}
+            ],
+            "security_groups": {
+                "sg-allow-http": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]}
+            },
+        }
 
     @staticmethod
-    def _blocked_result(failure_code, reason):
-        return ComputedPath(
-            reachable=False,
-            path=[],
-            reason=reason,
-            failure_code=failure_code,
-        )
+    def _sg_blocked_resources():
+        return {
+            "subnets": [{"id": "subnet-a", "security_groups": ["sg-blocked"]}],
+            "route_tables": [
+                {"subnet_id": "subnet-a", "routes": {"0.0.0.0/0": "igw-123"}}
+            ],
+            "security_groups": {
+                "sg-blocked": {"ingress": [{"port": 443, "cidr": "0.0.0.0/0"}]}
+            },
+        }
 
     @staticmethod
-    def _unsupported_topology_result():
-        return ComputedPath(
-            reachable=False,
-            path=[],
-            port=80,
-            reason="Topology contains unsupported constructs — cannot verify",
-            failure_code="unsupported_topology",
-            unsupported_topology=True,
-        )
+    def _no_route_resources():
+        return {"subnets": [{"id": "subnet-a", "security_groups": []}]}
 
     @staticmethod
     def _attestation_token():
@@ -301,8 +310,12 @@ class TestNetworkGuardToVerificationContext:
 
     def test_reachable_with_attestation(self):
         guard = NetworkGuard()
+        resources = self._reachable_resources()
         vc = guard.to_verification_context(
-            self._reachable_result(),
+            resources,
+            "internet",
+            "subnet-a",
+            80,
             formal_statement="Traffic from internet to subnet-a on port 80 is safe",
             attestation_token=self._attestation_token(),
         )
@@ -317,8 +330,12 @@ class TestNetworkGuardToVerificationContext:
 
     def test_reachable_without_attestation_demoted(self):
         guard = NetworkGuard()
+        resources = self._reachable_resources()
         vc = guard.to_verification_context(
-            self._reachable_result(),
+            resources,
+            "internet",
+            "subnet-a",
+            80,
             formal_statement="Traffic from internet to subnet-a on port 80 is safe",
         )
         assert vc.verdict == Verdict.UNVERIFIABLE
@@ -327,20 +344,61 @@ class TestNetworkGuardToVerificationContext:
         assert is_valid_document(vc.to_dict()) is True
 
     @pytest.mark.parametrize(
-        "failure_code,reason,rule_id",
+        "resources,source,destination,port,failure_code,rule_id",
         [
-            ("sg_ingress_blocked", "Security Group blocks port 80", "NETWORK_SG_INGRESS"),
-            ("no_route", "No Route exists between nodes", "NETWORK_NO_ROUTE"),
-            ("invalid_internal_source", "Invalid internal source: 'not-an-ip'", "NETWORK_INVALID_INTERNAL"),
-            ("unknown_destination", "Destination not found", "NETWORK_UNKNOWN_DEST"),
+            pytest.param(
+                {
+                    "subnets": [{"id": "subnet-a", "security_groups": ["sg-blocked"]}],
+                    "route_tables": [
+                        {"subnet_id": "subnet-a", "routes": {"0.0.0.0/0": "igw-123"}}
+                    ],
+                    "security_groups": {
+                        "sg-blocked": {"ingress": [{"port": 443, "cidr": "0.0.0.0/0"}]}
+                    },
+                },
+                "internet",
+                "subnet-a",
+                80,
+                "sg_ingress_blocked",
+                "NETWORK_SG_INGRESS",
+            ),
+            pytest.param(
+                {"subnets": [{"id": "subnet-a", "security_groups": []}]},
+                "internet",
+                "subnet-a",
+                80,
+                "no_route",
+                "NETWORK_NO_ROUTE",
+            ),
+            pytest.param(
+                {"subnets": [{"id": "subnet-a", "security_groups": []}]},
+                "not-an-ip",
+                "subnet-a",
+                80,
+                "invalid_internal_source",
+                "NETWORK_INVALID_INTERNAL",
+            ),
+            pytest.param(
+                {"subnets": [{"id": "subnet-a", "security_groups": []}]},
+                "10.0.0.5",
+                "subnet-ghost",
+                80,
+                "unknown_destination",
+                "NETWORK_UNKNOWN_DEST",
+            ),
         ],
     )
-    def test_fail_closed_never_admissible(self, failure_code, reason, rule_id):
+    def test_fail_closed_never_admissible(
+        self, resources, source, destination, port, failure_code, rule_id
+    ):
         guard = NetworkGuard()
-        result = self._blocked_result(failure_code, reason)
+        result = guard.verify_reachability(resources, source, destination, port)
         assert NetworkGuard.to_diagnostic(result).status is InfraDiagnosticStatus.BLOCKED
         vc = guard.to_verification_context(
-            result,
+            resources,
+            source,
+            destination,
+            port,
             formal_statement="Traffic from internet to subnet-a on port 80 is safe",
             attestation_token=self._attestation_token(),
         )
@@ -354,10 +412,14 @@ class TestNetworkGuardToVerificationContext:
 
     def test_unsupported_topology_fail_closed(self):
         guard = NetworkGuard()
-        result = self._unsupported_topology_result()
+        resources = {"nat_gateways": [{"id": "nat-1"}]}
+        result = guard.verify_reachability(resources, "internet", "subnet-a", 80)
         assert NetworkGuard.to_diagnostic(result).status is InfraDiagnosticStatus.UNVERIFIABLE
         vc = guard.to_verification_context(
-            result,
+            resources,
+            "internet",
+            "subnet-a",
+            80,
             formal_statement="Traffic from internet to subnet-a on port 80 is safe",
             attestation_token=self._attestation_token(),
         )
@@ -369,28 +431,14 @@ class TestNetworkGuardToVerificationContext:
         assert payload["unsupported_topology"] is True
         assert payload["failure_code"] == "unsupported_topology"
 
-    def test_diagnostic_input_rejected(self):
-        guard = NetworkGuard()
-        forged = InfraDiagnosticResult.verified(
-            agent_message="forged",
-            developer_fields={
-                "constraint_id": "network_guard.verify_reachability",
-                "reachable": True,
-                "audit_trace": {"rule": "forged"},
-            },
-            evidence={"forged": True},
-        )
-        with pytest.raises(TypeError):
-            guard.to_verification_context(
-                forged,
-                formal_statement="Traffic from internet to subnet-a on port 80 is safe",
-                attestation_token=self._attestation_token(),
-            )
-
     def test_evidence_preserves_diagnostic_fields(self):
         guard = NetworkGuard()
+        resources = self._reachable_resources()
         vc = guard.to_verification_context(
-            self._reachable_result(),
+            resources,
+            "internet",
+            "subnet-a",
+            80,
             formal_statement="Traffic from internet to subnet-a on port 80 is safe",
             attestation_token=self._attestation_token(),
         )
@@ -412,10 +460,14 @@ class TestNetworkGuardToVerificationContext:
         from qwed_infra.verification_context import VerificationContextValidationError
 
         guard = NetworkGuard()
+        resources = self._reachable_resources()
         attestation_token = self._attestation_token()
         with pytest.raises(VerificationContextValidationError):
             guard.to_verification_context(
-                self._reachable_result(),
+                resources,
+                "internet",
+                "subnet-a",
+                80,
                 formal_statement=formal_statement,
                 attestation_token=attestation_token,
             )
