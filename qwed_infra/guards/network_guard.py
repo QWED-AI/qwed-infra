@@ -278,22 +278,28 @@ class NetworkGuard:
 
     def to_verification_context(
         self,
-        result: InfraDiagnosticResult,
+        result: ComputedPath,
         formal_statement: str,
         attestation_token: Optional[str] = None,
     ) -> VerificationContextDocument:
-        """Map an InfraDiagnosticResult to a Verification Context v1.0 document.
+        """Map a ComputedPath to a Verification Context v1.0 document.
 
-        Fail-closed provenance gate: a VERIFIED diagnostic is only admitted
-        when it carries NetworkGuard provenance (constraint_id) and an explicit
-        reachable=True outcome. Any other VERIFIED input (forged, mismatched,
-        or missing fields) is demoted to BLOCKED so admission can never be
-        granted from a diagnostic the guard did not produce.
+        The diagnostic is derived inside the guard via to_diagnostic(), so a
+        caller cannot inject a forged InfraDiagnosticResult into the bridge.
+        The provenance gate remains as defense-in-depth: only a VERIFIED
+        diagnostic carrying NetworkGuard provenance and an explicit
+        reachable=True outcome is admitted; anything else is BLOCKED.
         """
+        if not isinstance(result, ComputedPath):
+            raise TypeError(
+                f"result must be a ComputedPath, got {type(result).__name__}"
+            )
+
+        diagnostic = self.to_diagnostic(result)
         decision_status = None
-        if result.status is InfraDiagnosticStatus.VERIFIED and not (
-            result.developer_fields.get("constraint_id") == _NETWORK_CONSTRAINT_ID
-            and result.developer_fields.get("reachable") is True
+        if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
+            diagnostic.developer_fields.get("constraint_id") == _NETWORK_CONSTRAINT_ID
+            and diagnostic.developer_fields.get("reachable") is True
         ):
             decision_status = InfraDiagnosticStatus.BLOCKED
 
@@ -302,7 +308,7 @@ class NetworkGuard:
         )
 
         return verification_context_from_diagnostic_result(
-            result,
+            diagnostic,
             formal_statement=formal_statement,
             attestation_token=attestation_token,
             verifier="NetworkGuard",
