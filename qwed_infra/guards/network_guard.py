@@ -12,7 +12,8 @@ from qwed_infra.audit import (
     NETWORK_UNSUPPORTED_TOPOLOGY,
     build_trace,
 )
-from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
+from qwed_infra.verification_context import VerificationContextDocument
 
 _NETWORK_CONSTRAINT_ID = "network_guard.verify_reachability"
 
@@ -228,6 +229,7 @@ class NetworkGuard:
                     "path": [],
                     "port": result.port,
                     "reason": result.reason,
+                    "failure_code": result.failure_code,
                     "unsupported_topology": True,
                     "audit_trace": trace,
                 },
@@ -272,4 +274,43 @@ class NetworkGuard:
                 "failure_code": result.failure_code,
                 "audit_trace": trace,
             },
+        )
+
+    def to_verification_context(
+        self,
+        resources: Dict[str, Any],
+        source: str,
+        destination: str,
+        port: int,
+        *,
+        formal_statement: str,
+        attestation_token: Optional[str] = None,
+    ) -> VerificationContextDocument:
+        """Run the reachability check and map the result to a VC v1.0 document.
+
+        The guard performs the computation itself via verify_reachability(),
+        so a caller cannot inject a result object of any kind. The
+        provenance gate remains as defense-in-depth: only a VERIFIED
+        diagnostic carrying NetworkGuard provenance and an explicit
+        reachable=True outcome is admitted; anything else is BLOCKED.
+        """
+        result = self.verify_reachability(resources, source, destination, port)
+        diagnostic = self.to_diagnostic(result)
+        decision_status = None
+        if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
+            diagnostic.developer_fields.get("constraint_id") == _NETWORK_CONSTRAINT_ID
+            and diagnostic.developer_fields.get("reachable") is True
+        ):
+            decision_status = InfraDiagnosticStatus.BLOCKED
+
+        from qwed_infra.verification_context_bridge import (
+            verification_context_from_diagnostic_result,
+        )
+
+        return verification_context_from_diagnostic_result(
+            diagnostic,
+            formal_statement=formal_statement,
+            attestation_token=attestation_token,
+            verifier="NetworkGuard",
+            decision_status=decision_status,
         )

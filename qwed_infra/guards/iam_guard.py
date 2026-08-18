@@ -368,22 +368,28 @@ class IamGuard:
 
     def to_verification_context(
         self,
-        result: InfraDiagnosticResult,
+        policy: Dict[str, Any],
+        action: str,
+        resource: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
         formal_statement: str,
         attestation_token: Optional[str] = None,
     ) -> VerificationContextDocument:
-        """Map an InfraDiagnosticResult to a Verification Context v1.0 document.
+        """Run the access check and map the result to a VC v1.0 document.
 
-        A verified IAM denial (allowed=False) must never be admissible: the
-        bridge grants ADMIT to every VERIFIED status, so a proven deny is
-        demoted to BLOCKED (fail-closed) via the decision override. The
-        evidence keeps the authoritative VERIFIED status and proof_ref so the
-        audit trail preserves the formal proof provenance.
+        The guard performs the computation itself via verify_access(), so a
+        caller cannot inject a result object of any kind. The provenance
+        gate remains as defense-in-depth: only a VERIFIED diagnostic
+        carrying IamGuard provenance and an explicit allowed=True outcome is
+        admitted; a proven denial or any other result is BLOCKED.
         """
+        result = self.verify_access(policy, action, resource, context)
+        diagnostic = IamGuard.to_diagnostic(result)
         decision_status = None
-        if (
-            result.status is InfraDiagnosticStatus.VERIFIED
-            and result.developer_fields.get("allowed") is False
+        if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
+            diagnostic.developer_fields.get("constraint_id") == _IAM_CONSTRAINT_ID
+            and diagnostic.developer_fields.get("allowed") is True
         ):
             decision_status = InfraDiagnosticStatus.BLOCKED
 
@@ -392,7 +398,7 @@ class IamGuard:
         )
 
         return verification_context_from_diagnostic_result(
-            result,
+            diagnostic,
             formal_statement=formal_statement,
             attestation_token=attestation_token,
             verifier="IamGuard",
