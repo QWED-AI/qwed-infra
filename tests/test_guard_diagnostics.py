@@ -447,6 +447,8 @@ class TestNetworkGuardToVerificationContext:
         assert payload["developer_fields"]["constraint_id"] == "network_guard.verify_reachability"
         assert payload["developer_fields"]["reachable"] is True
         assert payload["developer_fields"]["path"] == ("internet", "subnet-a")
+        serialized = vc.context.evidence.to_dict()["payload"]["developer_fields"]["path"]
+        assert serialized == ["internet", "subnet-a"]
 
     @pytest.mark.parametrize(
         "formal_statement",
