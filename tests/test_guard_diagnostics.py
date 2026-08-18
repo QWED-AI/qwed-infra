@@ -198,10 +198,11 @@ class TestIamGuardToVerificationContext:
         from qwed_infra.verification_context import VerificationContextValidationError
 
         guard = IamGuard()
+        policy = self._allow_policy()
         attestation_token = self._attestation_token()
         with pytest.raises(VerificationContextValidationError):
             guard.to_verification_context(
-                self._allow_policy(),
+                policy,
                 "s3:GetObject",
                 "*",
                 formal_statement=formal_statement,
