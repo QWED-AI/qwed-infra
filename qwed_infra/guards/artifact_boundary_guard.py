@@ -1,6 +1,6 @@
 import fnmatch
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 from qwed_infra.audit import (
     ARTIFACT_BOUNDARY_VERIFIED,
@@ -11,7 +11,8 @@ from qwed_infra.audit import (
     ARTIFACT_UNKNOWN_BOUNDARY,
     build_trace,
 )
-from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
+from qwed_infra.verification_context import VerificationContextDocument
 
 _ARTIFACT_CONSTRAINT_ID = "artifact_boundary_guard.verify_package_boundary"
 
@@ -398,4 +399,42 @@ class ArtifactBoundaryGuard:
                 "audit_trace": trace,
                 "rule_ids": rule_ids,
             },
+        )
+
+    def to_verification_context(
+        self,
+        package_dir: str = "qwed_infra",
+        pyproject_path: str | None = None,
+        package_name: str = "qwed_infra",
+        *,
+        formal_statement: str,
+        attestation_token: Optional[str] = None,
+    ) -> VerificationContextDocument:
+        """Run the package-boundary check and map the result to a VC v1.0 document.
+
+        The guard performs the computation itself via verify_package_boundary()
+        against the real filesystem, so a caller cannot inject a result object.
+        The provenance gate remains as defense-in-depth: only a VERIFIED
+        diagnostic carrying ArtifactBoundaryGuard provenance and an explicit
+        is_safe=True outcome is admitted; anything else is BLOCKED.
+        """
+        result = self.verify_package_boundary(package_dir, pyproject_path, package_name)
+        diagnostic = self.to_diagnostic(result)
+        decision_status = None
+        if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
+            diagnostic.developer_fields.get("constraint_id") == _ARTIFACT_CONSTRAINT_ID
+            and diagnostic.developer_fields.get("is_safe") is True
+        ):
+            decision_status = InfraDiagnosticStatus.BLOCKED
+
+        from qwed_infra.verification_context_bridge import (
+            verification_context_from_diagnostic_result,
+        )
+
+        return verification_context_from_diagnostic_result(
+            diagnostic,
+            formal_statement=formal_statement,
+            attestation_token=attestation_token,
+            verifier="ArtifactBoundaryGuard",
+            decision_status=decision_status,
         )

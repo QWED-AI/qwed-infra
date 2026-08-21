@@ -1,6 +1,9 @@
+from pathlib import Path
+
 import pydantic
 import pytest
 from qwed_infra.diagnostics import InfraDiagnosticStatus
+from qwed_infra.guards.artifact_boundary_guard import ArtifactBoundaryGuard
 from qwed_infra.guards.iam_guard import IamGuard, VerificationResult
 from qwed_infra.guards.network_guard import ComputedPath, NetworkGuard
 from qwed_infra.guards.cost_guard import CostEstimate, CostGuard
@@ -772,6 +775,137 @@ class TestCostGuardToVerificationContext:
             guard.to_verification_context(
                 resources,
                 "100.00",
+                formal_statement=formal_statement,
+                attestation_token=attestation_token,
+            )
+
+
+class TestArtifactBoundaryGuardToVerificationContext:
+    FORMAL_STATEMENT = "Package boundary is safe to publish"
+
+    @staticmethod
+    def _attestation_token():
+        return "attestation-fixture-opaque"
+
+    @staticmethod
+    def _write_file(path: Path, content: str = ""):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        return path
+
+    def _safe_package(self, tmp_path: Path):
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
+        )
+        return pkg, str(tmp_path / "pyproject.toml")
+
+    def test_safe_package_with_attestation(self, tmp_path):
+        guard = ArtifactBoundaryGuard()
+        pkg, pyproject = self._safe_package(tmp_path)
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=pyproject,
+            package_name="mypkg",
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.VERIFIED
+        assert vc.context.decision.admission == Admission.ADMIT
+        assert vc.context.proof.verifier == "ArtifactBoundaryGuard"
+        assert vc.context.evidence.proof_ref.startswith("sha256:")
+        assert len(vc.context.evidence.proof_ref) == 71
+        doc_dict = vc.to_dict()
+        assert is_valid_document(doc_dict) is True
+        assert resolve_document_proof_ref(doc_dict) is True
+
+    def test_safe_package_without_attestation_demoted(self, tmp_path):
+        guard = ArtifactBoundaryGuard()
+        pkg, pyproject = self._safe_package(tmp_path)
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=pyproject,
+            package_name="mypkg",
+            formal_statement=self.FORMAL_STATEMENT,
+        )
+        assert vc.verdict == Verdict.UNVERIFIABLE
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    def test_unsafe_package_never_admissible(self, tmp_path):
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / ".env", "API_KEY=abc123")
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["is_safe"] is False
+        finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
+        assert "disclosure_risk" in finding_types
+
+    def test_missing_directory_fails_closed(self, tmp_path):
+        guard = ArtifactBoundaryGuard()
+        vc = guard.to_verification_context(
+            package_dir=str(tmp_path / "nonexistent_dir"),
+            pyproject_path=str(tmp_path / "nonexistent.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        assert vc.context.evidence.payload["developer_fields"]["is_safe"] is False
+
+    def test_evidence_preserves_diagnostic_fields(self, tmp_path):
+        guard = ArtifactBoundaryGuard()
+        pkg, pyproject = self._safe_package(tmp_path)
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=pyproject,
+            package_name="mypkg",
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["constraint_id"] == "artifact_boundary_guard.verify_package_boundary"
+        assert payload["developer_fields"]["is_safe"] is True
+        assert payload["developer_fields"]["rule_ids"] == ("ARTIFACT_BOUNDARY_VERIFIED",)
+        assert payload["developer_fields"]["file_count"] >= 1
+        assert payload["developer_fields"]["audit_trace"]["rule_id"] == "ARTIFACT_BOUNDARY_VERIFIED"
+
+    @pytest.mark.parametrize(
+        "formal_statement",
+        [
+            "",
+            "   \n\t ",
+            123,
+            None,
+        ],
+    )
+    def test_invalid_formal_statement_rejected(self, tmp_path, formal_statement):
+        from qwed_infra.verification_context import VerificationContextValidationError
+
+        guard = ArtifactBoundaryGuard()
+        pkg, pyproject = self._safe_package(tmp_path)
+        attestation_token = self._attestation_token()
+        with pytest.raises(VerificationContextValidationError):
+            guard.to_verification_context(
+                package_dir=str(pkg),
+                pyproject_path=pyproject,
+                package_name="mypkg",
                 formal_statement=formal_statement,
                 attestation_token=attestation_token,
             )
