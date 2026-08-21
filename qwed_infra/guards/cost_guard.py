@@ -1,5 +1,5 @@
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict
+from decimal import Decimal, DecimalException, ROUND_HALF_UP
+from typing import Any, Dict, Optional
 from pydantic import BaseModel
 from qwed_infra.audit import (
     COST_BUDGET_EXCEEDED,
@@ -7,10 +7,12 @@ from qwed_infra.audit import (
     COST_WITHIN_BUDGET,
     build_trace,
 )
-from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 from qwed_infra.numeric import decimal_text, parse_decimal_input
+from qwed_infra.verification_context import VerificationContextDocument
 
 _COST_CONSTRAINT_ID = "cost_guard.verify_budget"
+_INVALID_INPUT_MESSAGE = "Cost estimate could not be verified"
 
 TWO_PLACES = Decimal("0.01")
 
@@ -103,7 +105,7 @@ class CostGuard:
             unknown_instance_types.append("<missing>")
             return Decimal("0")
         count = inst.get("count", 1)
-        if not isinstance(count, int) or count < 1:
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             inst_id = inst.get("id") or inst_type
             key = self._unique_key(breakdown, f"invalid-count-{inst_id}")
             breakdown[key] = decimal_text(Decimal("0.00"))
@@ -132,7 +134,7 @@ class CostGuard:
             unknown_volume_types.append("<missing>")
             return Decimal("0")
         size_gb = vol.get("size_gb")
-        if not isinstance(size_gb, int) or size_gb < 1:
+        if isinstance(size_gb, bool) or not isinstance(size_gb, int) or size_gb < 1:
             key = self._unique_key(breakdown, f"invalid-size-{vol.get('id') or vol_type}")
             breakdown[key] = decimal_text(Decimal("0.00"))
             unknown_volume_types.append(f"invalid size_gb ({size_gb})")
@@ -186,7 +188,7 @@ class CostGuard:
             budget = parse_decimal_input(result.budget, "budget")
         except ValueError:
             return InfraDiagnosticResult.blocked(
-                agent_message="Cost estimate could not be verified",
+                agent_message=_INVALID_INPUT_MESSAGE,
                 developer_fields={
                     "constraint_id": _COST_CONSTRAINT_ID,
                     "within_budget": result.within_budget,
@@ -211,7 +213,7 @@ class CostGuard:
             )
             trace = build_trace(trace_rule, "INCONSISTENT")
             return InfraDiagnosticResult.blocked(
-                agent_message="Cost estimate could not be verified",
+                agent_message=_INVALID_INPUT_MESSAGE,
                 developer_fields={
                     "constraint_id": _COST_CONSTRAINT_ID,
                     "within_budget": result.within_budget,
@@ -265,4 +267,54 @@ class CostGuard:
                 "audit_trace": trace,
             },
             evidence={**trace, "total_monthly_cost": result.total_monthly_cost, "budget": result.budget},
+        )
+
+    def to_verification_context(
+        self,
+        resources: Dict[str, Any],
+        budget_monthly: object,
+        *,
+        formal_statement: str,
+        attestation_token: Optional[str] = None,
+    ) -> VerificationContextDocument:
+        """Run the budget check and map the result to a VC v1.0 document.
+
+        The guard performs the computation itself via verify_budget(), so a
+        caller cannot inject a result object of any kind. Malformed inputs
+        (undecimal budget, non-dict resources, non-dict entries) map to a
+        fail-closed BLOCKED diagnostic rather than propagating an exception.
+        The provenance gate remains as defense-in-depth: only a VERIFIED
+        diagnostic carrying CostGuard provenance and an explicit
+        within_budget=True outcome is admitted; anything else is BLOCKED.
+        """
+        try:
+            result = self.verify_budget(resources, budget_monthly)
+        except (ValueError, TypeError, AttributeError, DecimalException):
+            diagnostic = InfraDiagnosticResult.blocked(
+                agent_message=_INVALID_INPUT_MESSAGE,
+                developer_fields={
+                    "constraint_id": _COST_CONSTRAINT_ID,
+                    "within_budget": False,
+                    "audit_trace": build_trace(COST_UNKNOWN_RESOURCE, "INVALID_INPUT"),
+                },
+            )
+        else:
+            diagnostic = self.to_diagnostic(result)
+        decision_status = None
+        if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
+            diagnostic.developer_fields.get("constraint_id") == _COST_CONSTRAINT_ID
+            and diagnostic.developer_fields.get("within_budget") is True
+        ):
+            decision_status = InfraDiagnosticStatus.BLOCKED
+
+        from qwed_infra.verification_context_bridge import (
+            verification_context_from_diagnostic_result,
+        )
+
+        return verification_context_from_diagnostic_result(
+            diagnostic,
+            formal_statement=formal_statement,
+            attestation_token=attestation_token,
+            verifier="CostGuard",
+            decision_status=decision_status,
         )

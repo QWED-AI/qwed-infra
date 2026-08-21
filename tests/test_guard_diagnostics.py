@@ -555,6 +555,228 @@ class TestCostGuardToDiagnostic:
         assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INCONSISTENT"
 
 
+class TestCostGuardToVerificationContext:
+    @staticmethod
+    def _within_budget_resources():
+        return {"instances": [{"id": "web", "instance_type": "t3.medium", "count": 1}]}
+
+    @staticmethod
+    def _exceeds_budget_resources():
+        return {"instances": [{"id": "gpu", "instance_type": "p4d.24xlarge", "count": 1}]}
+
+    @staticmethod
+    def _unknown_type_resources():
+        return {"instances": [{"id": "gpu-1", "instance_type": "g6.xlarge", "count": 1}]}
+
+    @staticmethod
+    def _attestation_token():
+        return "attestation-fixture-opaque"
+
+    def test_within_budget_with_attestation(self):
+        guard = CostGuard()
+        resources = self._within_budget_resources()
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.VERIFIED
+        assert vc.context.decision.admission == Admission.ADMIT
+        assert vc.context.proof.verifier == "CostGuard"
+        assert vc.context.evidence.proof_ref.startswith("sha256:")
+        assert len(vc.context.evidence.proof_ref) == 71
+        doc_dict = vc.to_dict()
+        assert is_valid_document(doc_dict) is True
+        assert resolve_document_proof_ref(doc_dict) is True
+
+    def test_within_budget_without_attestation_demoted(self):
+        guard = CostGuard()
+        resources = self._within_budget_resources()
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+        )
+        assert vc.verdict == Verdict.UNVERIFIABLE
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    def test_exceeds_budget_never_admissible(self):
+        guard = CostGuard()
+        resources = self._exceeds_budget_resources()
+        result = guard.verify_budget(resources, "100.00")
+        assert result.within_budget is False
+        assert CostGuard.to_diagnostic(result).status is InfraDiagnosticStatus.BLOCKED
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["within_budget"] is False
+        assert payload["developer_fields"]["audit_trace"]["rule_id"] == "COST_BUDGET_EXCEEDED"
+
+    def test_unknown_type_never_admissible(self):
+        guard = CostGuard()
+        resources = self._unknown_type_resources()
+        result = guard.verify_budget(resources, "100.00")
+        assert result.has_unknown_types is True
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["has_unknown_types"] is True
+        assert payload["developer_fields"]["audit_trace"]["rule_id"] == "COST_UNKNOWN_RESOURCE"
+
+    def test_invalid_budget_input_never_admissible(self):
+        guard = CostGuard()
+        vc = guard.to_verification_context(
+            self._within_budget_resources(),
+            "not-a-number",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["within_budget"] is False
+        assert payload["developer_fields"]["audit_trace"]["outcome"] == "INVALID_INPUT"
+
+    @pytest.mark.parametrize(
+        "resources",
+        [
+            {"instances": [None]},
+            {"instances": None},
+            "not-a-dict",
+        ],
+    )
+    def test_malformed_resources_blocked(self, resources):
+        guard = CostGuard()
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    def test_extreme_budget_decimal_escape_blocked(self):
+        guard = CostGuard()
+        vc = guard.to_verification_context(
+            self._within_budget_resources(),
+            "1e1000000",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    def test_extreme_count_decimal_escape_blocked(self):
+        guard = CostGuard()
+        resources = {"instances": [{"id": "web", "instance_type": "t3.medium", "count": 10**24}]}
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
+    @pytest.mark.parametrize("count", [True, False])
+    def test_boolean_count_blocked(self, count):
+        guard = CostGuard()
+        resources = {"instances": [{"id": "web", "instance_type": "t3.medium", "count": count}]}
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["has_unknown_types"] is True
+
+    @pytest.mark.parametrize("size_gb", [True, False])
+    def test_boolean_size_gb_blocked(self, size_gb):
+        guard = CostGuard()
+        resources = {"volumes": [{"id": "vol", "volume_type": "gp3", "size_gb": size_gb}]}
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["has_unknown_types"] is True
+
+    def test_evidence_preserves_diagnostic_fields(self):
+        guard = CostGuard()
+        resources = self._within_budget_resources()
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["constraint_id"] == "cost_guard.verify_budget"
+        assert payload["developer_fields"]["within_budget"] is True
+        assert payload["developer_fields"]["total_monthly_cost"] == "30.37"
+        assert payload["developer_fields"]["budget"] == "100.00"
+        assert payload["developer_fields"]["audit_trace"]["rule_id"] == "COST_WITHIN_BUDGET"
+
+    @pytest.mark.parametrize(
+        "formal_statement",
+        [
+            "",
+            "   \n\t ",
+            123,
+            None,
+        ],
+    )
+    def test_invalid_formal_statement_rejected(self, formal_statement):
+        from qwed_infra.verification_context import VerificationContextValidationError
+
+        guard = CostGuard()
+        resources = self._within_budget_resources()
+        attestation_token = self._attestation_token()
+        with pytest.raises(VerificationContextValidationError):
+            guard.to_verification_context(
+                resources,
+                "100.00",
+                formal_statement=formal_statement,
+                attestation_token=attestation_token,
+            )
+
+
 class TestPydanticExtraForbid:
     def test_iam_policy_rejects_extra(self):
         from qwed_infra.guards.iam_guard import IamPolicy
