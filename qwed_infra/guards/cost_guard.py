@@ -279,13 +279,26 @@ class CostGuard:
         """Run the budget check and map the result to a VC v1.0 document.
 
         The guard performs the computation itself via verify_budget(), so a
-        caller cannot inject a result object of any kind. The provenance
-        gate remains as defense-in-depth: only a VERIFIED diagnostic
-        carrying CostGuard provenance and an explicit within_budget=True
-        outcome is admitted; anything else is BLOCKED.
+        caller cannot inject a result object of any kind. Malformed inputs
+        (undecimal budget, non-dict resources, non-dict entries) map to a
+        fail-closed BLOCKED diagnostic rather than propagating an exception.
+        The provenance gate remains as defense-in-depth: only a VERIFIED
+        diagnostic carrying CostGuard provenance and an explicit
+        within_budget=True outcome is admitted; anything else is BLOCKED.
         """
-        result = self.verify_budget(resources, budget_monthly)
-        diagnostic = self.to_diagnostic(result)
+        try:
+            result = self.verify_budget(resources, budget_monthly)
+        except (ValueError, TypeError, AttributeError):
+            diagnostic = InfraDiagnosticResult.blocked(
+                agent_message="Cost estimate could not be verified",
+                developer_fields={
+                    "constraint_id": _COST_CONSTRAINT_ID,
+                    "within_budget": False,
+                    "audit_trace": build_trace(COST_UNKNOWN_RESOURCE, "INVALID_INPUT"),
+                },
+            )
+        else:
+            diagnostic = self.to_diagnostic(result)
         decision_status = None
         if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
             diagnostic.developer_fields.get("constraint_id") == _COST_CONSTRAINT_ID

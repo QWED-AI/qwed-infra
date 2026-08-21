@@ -641,6 +641,43 @@ class TestCostGuardToVerificationContext:
         assert payload["developer_fields"]["has_unknown_types"] is True
         assert payload["developer_fields"]["audit_trace"]["rule_id"] == "COST_UNKNOWN_RESOURCE"
 
+    def test_invalid_budget_input_never_admissible(self):
+        guard = CostGuard()
+        vc = guard.to_verification_context(
+            self._within_budget_resources(),
+            "not-a-number",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["within_budget"] is False
+        assert payload["developer_fields"]["audit_trace"]["outcome"] == "INVALID_INPUT"
+
+    @pytest.mark.parametrize(
+        "resources",
+        [
+            {"instances": [None]},
+            {"instances": None},
+            "not-a-dict",
+        ],
+    )
+    def test_malformed_resources_blocked(self, resources):
+        guard = CostGuard()
+        vc = guard.to_verification_context(
+            resources,
+            "100.00",
+            formal_statement="Estimated monthly cost is within the approved budget",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+
     def test_evidence_preserves_diagnostic_fields(self):
         guard = CostGuard()
         resources = self._within_budget_resources()
