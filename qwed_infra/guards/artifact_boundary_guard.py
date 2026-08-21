@@ -237,8 +237,27 @@ class ArtifactBoundaryGuard:
         data, err = ArtifactBoundaryGuard._try_load_toml(pyproject_path, pp_name)
         if err:
             return err
-        backend = data.get("build-system", {}).get("build-backend", "")
-        wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+        backend_section = data.get("build-system", {})
+        if not isinstance(backend_section, dict):
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="unknown_boundary",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason="Invalid [build-system] shape — packaging rules unverifiable",
+                )
+            )
+            return findings
+        backend = backend_section.get("build-backend", "")
+        node = data
+        wheel = {}
+        for key in ("tool", "hatch", "build", "targets", "wheel"):
+            if not isinstance(node, dict):
+                wheel = None  # mis-shaped intermediate section
+                break
+            node = node.get(key, {})
+        else:
+            wheel = node
         if backend and not backend.startswith("hatchling"):
             return findings
         if not isinstance(wheel, dict):
@@ -369,18 +388,20 @@ class ArtifactBoundaryGuard:
 
         if result.is_safe:
             trace = build_trace(ARTIFACT_BOUNDARY_VERIFIED, "ALLOWED")
+            manifest = sorted(result.package_files)
             return InfraDiagnosticResult.verified(
                 agent_message="Package boundary verified — safe to publish",
                 developer_fields={
                     "constraint_id": _ARTIFACT_CONSTRAINT_ID,
                     "is_safe": result.is_safe,
                     "file_count": len(result.package_files),
+                    "file_paths": manifest,
                     "findings": [f.model_dump() for f in result.findings],
                     "reason": result.reason,
                     "audit_trace": trace,
                     "rule_ids": [ARTIFACT_BOUNDARY_VERIFIED.rule_id],
                 },
-                evidence={**trace, "file_count": len(result.package_files)},
+                evidence={**trace, "file_count": len(result.package_files), "file_paths": manifest},
             )
 
         finding_types = sorted({f.finding_type for f in blocked}, key=ArtifactBoundaryGuard._finding_priority)
@@ -405,7 +426,6 @@ class ArtifactBoundaryGuard:
         self,
         package_dir: str = "qwed_infra",
         pyproject_path: str | None = None,
-        package_name: str = "qwed_infra",
         *,
         formal_statement: str,
         attestation_token: Optional[str] = None,
@@ -414,12 +434,29 @@ class ArtifactBoundaryGuard:
 
         The guard performs the computation itself via verify_package_boundary()
         against the real filesystem, so a caller cannot inject a result object.
+        The package identity is derived from the inspected package_dir, so a
+        caller cannot scan one directory while checking wheel configuration for
+        another. Malformed inputs and unexpected verification failures map to a
+        fail-closed BLOCKED diagnostic rather than propagating an exception.
         The provenance gate remains as defense-in-depth: only a VERIFIED
         diagnostic carrying ArtifactBoundaryGuard provenance and an explicit
         is_safe=True outcome is admitted; anything else is BLOCKED.
         """
-        result = self.verify_package_boundary(package_dir, pyproject_path, package_name)
-        diagnostic = self.to_diagnostic(result)
+        try:
+            # Bind package identity to the directory actually scanned.
+            package_name = Path(package_dir).name
+            result = self.verify_package_boundary(package_dir, pyproject_path, package_name)
+        except (TypeError, ValueError, AttributeError, KeyError, OSError):
+            diagnostic = InfraDiagnosticResult.blocked(
+                agent_message="Package boundary could not be verified",
+                developer_fields={
+                    "constraint_id": _ARTIFACT_CONSTRAINT_ID,
+                    "is_safe": False,
+                    "audit_trace": build_trace(ARTIFACT_UNKNOWN_BOUNDARY, "INVALID_INPUT"),
+                },
+            )
+        else:
+            diagnostic = self.to_diagnostic(result)
         decision_status = None
         if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
             diagnostic.developer_fields.get("constraint_id") == _ARTIFACT_CONSTRAINT_ID

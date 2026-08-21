@@ -809,7 +809,6 @@ class TestArtifactBoundaryGuardToVerificationContext:
         vc = guard.to_verification_context(
             package_dir=str(pkg),
             pyproject_path=pyproject,
-            package_name="mypkg",
             formal_statement=self.FORMAL_STATEMENT,
             attestation_token=self._attestation_token(),
         )
@@ -828,7 +827,6 @@ class TestArtifactBoundaryGuardToVerificationContext:
         vc = guard.to_verification_context(
             package_dir=str(pkg),
             pyproject_path=pyproject,
-            package_name="mypkg",
             formal_statement=self.FORMAL_STATEMENT,
         )
         assert vc.verdict == Verdict.UNVERIFIABLE
@@ -875,7 +873,6 @@ class TestArtifactBoundaryGuardToVerificationContext:
         vc = guard.to_verification_context(
             package_dir=str(pkg),
             pyproject_path=pyproject,
-            package_name="mypkg",
             formal_statement=self.FORMAL_STATEMENT,
             attestation_token=self._attestation_token(),
         )
@@ -885,6 +882,95 @@ class TestArtifactBoundaryGuardToVerificationContext:
         assert payload["developer_fields"]["rule_ids"] == ("ARTIFACT_BOUNDARY_VERIFIED",)
         assert payload["developer_fields"]["file_count"] >= 1
         assert payload["developer_fields"]["audit_trace"]["rule_id"] == "ARTIFACT_BOUNDARY_VERIFIED"
+
+    def test_manifest_distinguishes_artifact_set(self, tmp_path):
+        """Two packages with the same file count should not yield the same proof_ref.
+
+        The manifest (file_paths) is hashed into the evidence, so changing the
+        paths changes the proof identity even when the count is unchanged.
+        """
+        guard = ArtifactBoundaryGuard()
+
+        def make_verified_vc(name: str, rel_file: str):
+            pkg = tmp_path / name
+            pkg.mkdir(parents=True)
+            self._write_file(pkg / rel_file, f"# {name} {rel_file}")
+            pyproj = tmp_path / f"{name}_pyproject.toml"
+            self._write_file(
+                pyproj,
+                f"[tool.hatch.build.targets.wheel]\npackages = ['{name}']\n",
+            )
+            return guard.to_verification_context(
+                package_dir=str(pkg),
+                pyproject_path=str(pyproj),
+                formal_statement=self.FORMAL_STATEMENT,
+                attestation_token=self._attestation_token(),
+            )
+
+        # Same count, different path -> different manifest -> different proof_ref
+        vc1 = make_verified_vc("pkg_one", "alpha.py")
+        vc2 = make_verified_vc("pkg_two", "beta.py")
+        assert vc1.context.evidence.proof_ref != vc2.context.evidence.proof_ref
+
+    def test_none_package_dir_blocked(self):
+        guard = ArtifactBoundaryGuard()
+        vc = guard.to_verification_context(
+            package_dir=None,
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        assert vc.context.evidence.payload["developer_fields"]["is_safe"] is False
+
+    def test_malformed_pyproject_blocked(self, tmp_path):
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        # Scalar build-system -> structurally invalid for our traversal
+        self._write_file(tmp_path / "pyproject.toml", 'build-system = "hatchling"\n')
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["is_safe"] is False
+        finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
+        assert "unknown_boundary" in finding_types
+
+    def test_wheel_packages_outside_checked_directory_blocked(self, tmp_path):
+        """Identity binding: scanning 'mypkg' while wheel config lists another package
+        must be BLOCKED (the checked directory's files cannot be confounded)."""
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        # wheel packages reference a package that is NOT the scanned directory
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            "[tool.hatch.build.targets.wheel]\npackages = ['otherpkg']\n",
+        )
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["is_safe"] is False
+        finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
+        assert "missing_control" in finding_types
 
     @pytest.mark.parametrize(
         "formal_statement",
@@ -905,8 +991,7 @@ class TestArtifactBoundaryGuardToVerificationContext:
             guard.to_verification_context(
                 package_dir=str(pkg),
                 pyproject_path=pyproject,
-                package_name="mypkg",
-                formal_statement=formal_statement,
+                    formal_statement=formal_statement,
                 attestation_token=attestation_token,
             )
 
@@ -942,3 +1027,4 @@ class TestPydanticExtraForbid:
                 reason="ok",
                 extra="bad",
             )
+
