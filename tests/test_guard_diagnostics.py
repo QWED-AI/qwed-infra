@@ -1106,6 +1106,58 @@ class TestArtifactBoundaryGuardToVerificationContext:
         finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
         assert "missing_control" in finding_types
 
+    def test_non_string_build_backend_blocked(self, tmp_path):
+        """A build-backend that isn't a string (array/table) is a structured failure."""
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            "[build-system]\nbuild-backend = ['hatchling.build']\nrequires = ['hatchling']\n",
+        )
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
+        assert "unknown_boundary" in finding_types
+
+    def test_external_directory_symlink_blocked(self, tmp_path):
+        """A directory symlink pointing outside the scanned package fails closed."""
+        import os
+
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        external_dir = tmp_path / "external"
+        external_dir.mkdir()
+        self._write_file(external_dir / "leaked.py", "# secret")
+        try:
+            os.symlink(external_dir, pkg / "subdir", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks not permitted on this platform: {exc}")
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
+        )
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+
     def test_symlink_to_outside_blocked(self, tmp_path):
         """A file that's a symlink to a path outside the package resolves
         outside the scanned boundary -> BLOCKED."""

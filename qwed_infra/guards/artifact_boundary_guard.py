@@ -83,25 +83,48 @@ class ArtifactBoundaryGuard:
 
     @staticmethod
     def _collect_package_files(package_dir: Path) -> tuple[list[Path], list[ArtifactBoundaryFinding]]:
-        """Collect package files; surface broken symlinks as findings (never silently omitted)."""
+        """Collect package files; surface broken symlinks and symlinked directories as findings (never silently omitted)."""
         findings = []
         files = []
         if not package_dir.is_dir():
             return files, findings
         for f in sorted(package_dir.rglob("*")):
-            if f.is_symlink() and not f.exists():
-                findings.append(
-                    ArtifactBoundaryFinding(
-                        finding_type="unknown_boundary",
-                        severity="BLOCK",
-                        file_path=str(f.relative_to(package_dir)),
-                        reason="Broken symlink in package boundary — target does not exist",
+            if f.is_symlink():
+                if not f.exists():
+                    findings.append(
+                        ArtifactBoundaryFinding(
+                            finding_type="unknown_boundary",
+                            severity="BLOCK",
+                            file_path=str(f.relative_to(package_dir)),
+                            reason="Broken symlink in package boundary — target does not exist",
+                        )
                     )
-                )
+                    continue
+                if f.is_dir():
+                    findings.append(
+                        ArtifactBoundaryFinding(
+                            finding_type="unknown_boundary",
+                            severity="BLOCK",
+                            file_path=str(f.relative_to(package_dir)),
+                            reason="Symlinked directory in package boundary — its target cannot be bound",
+                        )
+                    )
+                    continue
+                if f.is_file():
+                    files.append(f)  # symlinked files are resolved and contained in _content_manifest
                 continue
             if f.is_file():
                 files.append(f)
         return files, findings
+
+    @staticmethod
+    def _hash_file(path: Path) -> str:
+        """Stream-hash a file in fixed-size chunks (never full-memory)."""
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _content_manifest(pkg_path: Path, package_files: list[Path]) -> tuple[list[ArtifactBoundaryFinding], list[str]]:
@@ -138,7 +161,7 @@ class ArtifactBoundaryGuard:
                 )
                 return findings, []
             try:
-                digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                digest = ArtifactBoundaryGuard._hash_file(resolved)
             except OSError as exc:
                 findings.append(
                     ArtifactBoundaryFinding(
@@ -339,6 +362,16 @@ class ArtifactBoundaryGuard:
             )
             return findings
         backend = backend_section.get("build-backend", "")
+        if not isinstance(backend, str):
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="unknown_boundary",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason="Invalid build-backend shape (must be a string) — packaging rules unverifiable",
+                )
+            )
+            return findings
         node = data
         wheel = {}
         for key in ("tool", "hatch", "build", "targets", "wheel"):
