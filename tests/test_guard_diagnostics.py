@@ -1082,6 +1082,30 @@ class TestArtifactBoundaryGuardToVerificationContext:
         finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
         assert "unknown_boundary" in finding_types
 
+    def test_hatchling_without_wheel_target_blocked(self, tmp_path):
+        """hatchling.build with no [tool.hatch.build.targets.wheel] section is denied —
+        the wheel boundary is inferred by the backend, not the declared scan."""
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[project]\nname = 'mypkg'\nversion = '0.1.0'\n",
+        )
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
+        assert "missing_control" in finding_types
+
     def test_symlink_to_outside_blocked(self, tmp_path):
         """A file that's a symlink to a path outside the package resolves
         outside the scanned boundary -> BLOCKED."""
@@ -1143,24 +1167,35 @@ class TestArtifactBoundaryGuardToVerificationContext:
         assert "unknown_boundary" in finding_types
 
     def test_wheel_entry_symlink_loop_blocked(self, tmp_path):
-        """A wheel entry that resolves through a symlink loop must not crash or ADMIT."""
+        """A wheel entry that resolves through a symlink loop must not crash or ADMIT.
+
+        The loop lives outside the scanned package file collection, so the
+        rejection must come from the wheel-entry path, not _collect_package_files.
+        """
         import os
 
         guard = ArtifactBoundaryGuard()
-        pkg = tmp_path / "mypkg"
-        pkg.mkdir(parents=True)
-        self._write_file(pkg / "__init__.py")
+        # The loop is a sibling of the scanned package under pkg_root, so the
+        # scanner cannot collect it; only wheel entry resolution traverses it.
+        pkg_root = tmp_path / "pkg_root"
+        pkg_root.mkdir()
+        scanned_pkg = pkg_root / "mypkg"
+        scanned_pkg.mkdir()
+        self._write_file(scanned_pkg / "__init__.py")
+
+        loop_dir = pkg_root / "somedir"
+        loop_dir.mkdir()
         try:
-            os.symlink("loop", pkg / "loop")
+            os.symlink("mypkg", loop_dir / "mypkg")
         except OSError as exc:
             pytest.skip(f"symlinks not permitted on this platform: {exc}")
         self._write_file(
-            tmp_path / "pyproject.toml",
-            "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['mypkg/loop']\n",
+            pkg_root / "pyproject.toml",
+            "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['somedir/mypkg/__init__.py']\n",
         )
         vc = guard.to_verification_context(
-            package_dir=str(pkg),
-            pyproject_path=str(tmp_path / "pyproject.toml"),
+            package_dir=str(scanned_pkg),
+            pyproject_path=str(pkg_root / "pyproject.toml"),
             formal_statement=self.FORMAL_STATEMENT,
             attestation_token=self._attestation_token(),
         )

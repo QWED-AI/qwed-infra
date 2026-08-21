@@ -372,6 +372,14 @@ class ArtifactBoundaryGuard:
             )
             return findings
         if not wheel:
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="missing_control",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason="No [tool.hatch.build.targets.wheel] section — the declared wheel packaging boundary is missing",
+                )
+            )
             return findings
         findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name, pyproject_path.parent, boundary_dir))
         return findings
@@ -408,9 +416,10 @@ class ArtifactBoundaryGuard:
         # Bind evidence to contents: hash every collected file, sorted.
         content_findings, content_manifest = self._content_manifest(pkg_path, package_files)
         if content_findings:
+            findings.extend(content_findings)
             return ArtifactBoundaryResult(
                 is_safe=False,
-                findings=content_findings,
+                findings=findings,
                 package_files=rel_paths,
                 reason="Package boundary could not be verified — could not hash contents",
                 content_manifest=[],
@@ -567,7 +576,7 @@ class ArtifactBoundaryGuard:
             # Bind package identity to the directory actually scanned.
             package_name = Path(package_dir).name
             result = self.verify_package_boundary(package_dir, pyproject_path, package_name)
-        except (TypeError, ValueError, AttributeError, KeyError, OSError):
+        except (TypeError, ValueError, AttributeError, KeyError, OSError, RuntimeError):
             diagnostic = InfraDiagnosticResult.blocked(
                 agent_message="Package boundary could not be verified",
                 developer_fields={
