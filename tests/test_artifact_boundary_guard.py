@@ -29,7 +29,7 @@ def test_to_diagnostic_verified(guard, tmp_path):
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -114,8 +114,10 @@ def test_missing_pyproject_fails_closed(guard, tmp_path):
     assert any(f.finding_type == "missing_control" for f in result.findings)
 
 
-def test_non_hatch_no_wheel_config_skips_gracefully(guard, tmp_path):
-    """No [build-system] defaults to setuptools (PEP 517) — skip hatch checks in v1."""
+def test_missing_backend_blocked(guard, tmp_path):
+    """Missing/unmodeled backend cannot be verified -> BLOCKED (fail-closed
+    per the backend allowlist: pip would still build it with setuptools,
+    whose rules are not modeled)."""
     pkg = tmp_path / "mypkg"
     pkg.mkdir(parents=True)
     _write_file(pkg / "__init__.py")
@@ -127,7 +129,26 @@ def test_non_hatch_no_wheel_config_skips_gracefully(guard, tmp_path):
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
         package_name="mypkg",
     )
-    assert result.is_safe is True
+    assert result.is_safe is False
+    assert any(f.finding_type == "unknown_boundary" for f in result.findings)
+
+
+def test_unmodeled_similar_backend_blocked(guard, tmp_path):
+    """Prefix lookalikes like hatchling.malicious must not pass the exact
+    allowlist (CodeRabbit)."""
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[build-system]\nbuild-backend = 'hatchling.malicious'\nrequires = ['whatever']\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is False
+    assert any(f.finding_type == "unknown_boundary" for f in result.findings)
 
 
 def test_pyproject_missing_package_in_packages(guard, tmp_path):
@@ -136,7 +157,7 @@ def test_pyproject_missing_package_in_packages(guard, tmp_path):
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['otherpkg']\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['otherpkg']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -162,7 +183,7 @@ def test_clean_package_passes(guard, tmp_path):
     _write_file(pkg / "module.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -270,7 +291,7 @@ def test_wheel_include_option_blocks(guard, tmp_path):
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\ninclude = ['extra/*']\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\ninclude = ['extra/*']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -286,7 +307,7 @@ def test_wheel_artifacts_option_blocks(guard, tmp_path):
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nartifacts = ['generated/*']\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nartifacts = ['generated/*']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -302,7 +323,7 @@ def test_wheel_force_include_option_blocks(guard, tmp_path):
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nforce-include = {'/etc/config' = 'config'}\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nforce-include = {'/etc/config' = 'config'}\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -318,7 +339,7 @@ def test_wheel_only_packages_allows_widening_opts(guard, tmp_path):
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\ninclude = ['extra/*']\nonly-packages = true\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\ninclude = ['extra/*']\nonly-packages = true\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -334,13 +355,33 @@ def test_file_named_tests_not_excluded(guard, tmp_path):
     assert any("tests" in f for f in result.package_files)
 
 
-def test_only_include_with_path_entries_passes(guard, tmp_path):
+def test_only_include_with_path_entries_outside_blocked(guard, tmp_path):
+    """only-include entries that resolve outside the scanned package_dir are
+    rejected (wheel could widen the boundary beyond what was inspected)."""
     pkg = tmp_path / "mypkg"
     pkg.mkdir(parents=True)
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['src/mypkg', 'mypkg/extra']\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['src/mypkg', 'mypkg/extra']\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is False
+    assert any(f.finding_type == "missing_control" for f in result.findings)
+
+
+def test_only_include_within_boundary_passes(guard, tmp_path):
+    """only-include entries resolving inside the scanned package_dir pass."""
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(pkg / "sub" / "extra.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['mypkg', 'mypkg/sub']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -355,7 +396,7 @@ def test_default_pyproject_path_resolved_from_package_dir(guard, tmp_path):
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
-        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
+        "[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), package_name="mypkg",
@@ -363,7 +404,7 @@ def test_default_pyproject_path_resolved_from_package_dir(guard, tmp_path):
     assert result.is_safe is True
 
 
-def test_non_hatch_backend_skips_wheel_check(guard, tmp_path):
+def test_non_hatch_backend_blocked(guard, tmp_path):
     pkg = tmp_path / "mypkg"
     pkg.mkdir(parents=True)
     _write_file(pkg / "__init__.py")
@@ -375,4 +416,5 @@ def test_non_hatch_backend_skips_wheel_check(guard, tmp_path):
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
         package_name="mypkg",
     )
-    assert result.is_safe is True
+    assert result.is_safe is False
+    assert any(f.finding_type == "unknown_boundary" for f in result.findings)
