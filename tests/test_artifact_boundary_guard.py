@@ -334,13 +334,33 @@ def test_file_named_tests_not_excluded(guard, tmp_path):
     assert any("tests" in f for f in result.package_files)
 
 
-def test_only_include_with_path_entries_passes(guard, tmp_path):
+def test_only_include_with_path_entries_outside_blocked(guard, tmp_path):
+    """only-include entries that resolve outside the scanned package_dir are
+    rejected (wheel could widen the boundary beyond what was inspected)."""
     pkg = tmp_path / "mypkg"
     pkg.mkdir(parents=True)
     _write_file(pkg / "__init__.py")
     _write_file(
         tmp_path / "pyproject.toml",
         "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['src/mypkg', 'mypkg/extra']\n",
+    )
+    result = guard.verify_package_boundary(
+        package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
+        package_name="mypkg",
+    )
+    assert result.is_safe is False
+    assert any(f.finding_type == "missing_control" for f in result.findings)
+
+
+def test_only_include_within_boundary_passes(guard, tmp_path):
+    """only-include entries resolving inside the scanned package_dir pass."""
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir(parents=True)
+    _write_file(pkg / "__init__.py")
+    _write_file(pkg / "sub" / "extra.py")
+    _write_file(
+        tmp_path / "pyproject.toml",
+        "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = ['mypkg', 'mypkg/sub']\n",
     )
     result = guard.verify_package_boundary(
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
@@ -363,7 +383,7 @@ def test_default_pyproject_path_resolved_from_package_dir(guard, tmp_path):
     assert result.is_safe is True
 
 
-def test_non_hatch_backend_skips_wheel_check(guard, tmp_path):
+def test_non_hatch_backend_blocked(guard, tmp_path):
     pkg = tmp_path / "mypkg"
     pkg.mkdir(parents=True)
     _write_file(pkg / "__init__.py")
@@ -375,4 +395,5 @@ def test_non_hatch_backend_skips_wheel_check(guard, tmp_path):
         package_dir=str(pkg), pyproject_path=str(tmp_path / "pyproject.toml"),
         package_name="mypkg",
     )
-    assert result.is_safe is True
+    assert result.is_safe is False
+    assert any(f.finding_type == "unknown_boundary" for f in result.findings)

@@ -1,4 +1,5 @@
 import fnmatch
+import hashlib
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel
@@ -61,6 +62,7 @@ class ArtifactBoundaryResult(BaseModel):
     findings: List[ArtifactBoundaryFinding]
     package_files: List[str]
     reason: str
+    content_manifest: List[str] = []
 
 
 class ArtifactBoundaryGuard:
@@ -82,6 +84,28 @@ class ArtifactBoundaryGuard:
             if f.is_file():
                 files.append(f)
         return sorted(files)
+
+    @staticmethod
+    def _content_manifest(pkg_path: Path, package_files: list[Path]) -> tuple[list[ArtifactBoundaryFinding], list[str]]:
+        """Bind each collected package file to its sha256 content digest (sorted)."""
+        manifest_items = []
+        findings = []
+        for f in package_files:
+            rel = str(f.relative_to(pkg_path))
+            try:
+                digest = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError as exc:
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="unknown_boundary",
+                        severity="BLOCK",
+                        file_path=rel,
+                        reason=f"Could not hash '{rel}' for the artifact manifest — cannot bind contents: {exc}",
+                    )
+                )
+                return findings, []
+            manifest_items.append(f"{rel}={digest}")
+        return findings, sorted(manifest_items)
 
     @staticmethod
     def _try_load_toml(pyproject_path: Path, pp_name: str):
@@ -113,7 +137,32 @@ class ArtifactBoundaryGuard:
             ]
 
     @staticmethod
-    def _check_wheel_packages(packages, package_name: str, pp_name: str) -> tuple[list[ArtifactBoundaryFinding], bool]:
+    def _entry_within_boundary(entry: str, package_name: str, base_dir: Path, boundary_dir: Path) -> tuple[bool, str | None]:
+        """Check a wheel entry stays inside the scanned package boundary.
+
+        - package_name must appear as a path component of the entry
+        - entry cannot be absolute or contain '..' traversal
+        - resolved path must live under package_dir
+        Returns (is_allowed, rejection_reason).
+        """
+        entry_path = Path(entry)
+        if entry_path.is_absolute():
+            return False, f"wheel entry '{entry}' is an absolute path, outside boundary '{package_name}'"
+        if ".." in entry_path.parts:
+            return False, f"wheel entry '{entry}' escapes boundary '{package_name}'"
+        if package_name not in entry_path.parts:
+            return False, f"Package '{package_name}' not referenced by wheel entry '{entry}'"
+        resolved_entry = (base_dir / entry_path).resolve()
+        resolved_boundary = boundary_dir.resolve()
+        try:
+            if resolved_boundary not in resolved_entry.parents and resolved_entry != resolved_boundary:
+                return False, f"wheel entry '{entry}' resolves outside inspected boundary '{package_name}'"
+        except OSError:
+            return False, f"wheel entry '{entry}' could not be resolved within '{package_name}'"
+        return True, None
+
+    @staticmethod
+    def _check_wheel_packages(packages, package_name: str, pp_name: str, base_dir: Path, boundary_dir: Path) -> tuple[list[ArtifactBoundaryFinding], bool]:
         findings = []
         if not isinstance(packages, list) or not all(isinstance(p, str) for p in packages):
             findings.append(
@@ -136,30 +185,23 @@ class ArtifactBoundaryGuard:
             )
             return findings, False
         for pkg in packages:
-            if package_name not in Path(pkg).parts:
+            allowed, reason = ArtifactBoundaryGuard._entry_within_boundary(
+                pkg, package_name, base_dir, boundary_dir
+            )
+            if not allowed:
                 findings.append(
                     ArtifactBoundaryFinding(
                         finding_type="missing_control",
                         severity="BLOCK",
                         file_path=pp_name,
-                        reason=f"Package '{pkg}' in wheel packages is outside verified boundary '{package_name}'",
+                        reason=reason,
                     )
                 )
                 return findings, False
-        if not any(package_name in Path(p).parts for p in packages):
-            findings.append(
-                ArtifactBoundaryFinding(
-                    finding_type="missing_control",
-                    severity="BLOCK",
-                    file_path=pp_name,
-                    reason=f"Package '{package_name}' not listed in [tool.hatch.build.targets.wheel].packages",
-                )
-            )
-            return findings, False
         return findings, True
 
     @staticmethod
-    def _check_wheel_only_include(only_include, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+    def _check_wheel_only_include(only_include, package_name: str, pp_name: str, base_dir: Path, boundary_dir: Path) -> list[ArtifactBoundaryFinding]:
         findings = []
         if not isinstance(only_include, list) or not all(isinstance(e, str) for e in only_include):
             findings.append(
@@ -174,7 +216,10 @@ class ArtifactBoundaryGuard:
         if only_include:
             has_valid = False
             for entry in only_include:
-                if package_name in Path(entry).parts:
+                allowed, reason = ArtifactBoundaryGuard._entry_within_boundary(
+                    entry, package_name, base_dir, boundary_dir
+                )
+                if allowed:
                     has_valid = True
                 else:
                     findings.append(
@@ -182,7 +227,7 @@ class ArtifactBoundaryGuard:
                             finding_type="missing_control",
                             severity="BLOCK",
                             file_path=pp_name,
-                            reason=f"only-include entry '{entry}' is outside verified boundary '{package_name}'",
+                            reason=reason,
                         )
                     )
             if not has_valid:
@@ -197,16 +242,16 @@ class ArtifactBoundaryGuard:
         return findings
 
     @staticmethod
-    def _check_wheel_config(wheel, package_name: str, pp_name: str) -> list[ArtifactBoundaryFinding]:
+    def _check_wheel_config(wheel, package_name: str, pp_name: str, base_dir: Path, boundary_dir: Path) -> list[ArtifactBoundaryFinding]:
         findings = []
         pkg_findings, ok = ArtifactBoundaryGuard._check_wheel_packages(
-            wheel.get("packages", []), package_name, pp_name
+            wheel.get("packages", []), package_name, pp_name, base_dir, boundary_dir
         )
         if not ok:
             return pkg_findings
         findings.extend(pkg_findings)
         only_include = wheel.get("only-include", [])
-        findings.extend(ArtifactBoundaryGuard._check_wheel_only_include(only_include, package_name, pp_name))
+        findings.extend(ArtifactBoundaryGuard._check_wheel_only_include(only_include, package_name, pp_name, base_dir, boundary_dir))
         if not wheel.get("only-packages", False):
             widening = [opt for opt in ("include", "artifacts", "force-include") if wheel.get(opt)]
             if widening:
@@ -259,6 +304,17 @@ class ArtifactBoundaryGuard:
         else:
             wheel = node
         if backend and not backend.startswith("hatchling"):
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="unknown_boundary",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason=(
+                        f"Unsupported build backend '{backend}' — packaging rules are "
+                        "not modeled, so the built-wheel boundary cannot be verified"
+                    ),
+                )
+            )
             return findings
         if not isinstance(wheel, dict):
             findings.append(
@@ -272,7 +328,8 @@ class ArtifactBoundaryGuard:
             return findings
         if not wheel:
             return findings
-        findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name))
+        boundary_dir = pyproject_path.parent / package_name
+        findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name, pyproject_path.parent, boundary_dir))
         return findings
 
     def verify_package_boundary(
@@ -302,6 +359,17 @@ class ArtifactBoundaryGuard:
 
         package_files = self._collect_package_files(pkg_path)
         rel_paths = [str(f.relative_to(pkg_path)) for f in package_files]
+
+        # Bind evidence to contents: hash every collected file, sorted.
+        content_findings, content_manifest = self._content_manifest(pkg_path, package_files)
+        if content_findings:
+            return ArtifactBoundaryResult(
+                is_safe=False,
+                findings=content_findings,
+                package_files=rel_paths,
+                reason="Package boundary could not be verified — could not hash contents",
+                content_manifest=[],
+            )
 
         for f in package_files:
             rel_path = f.relative_to(pkg_path)
@@ -364,6 +432,7 @@ class ArtifactBoundaryGuard:
             findings=findings,
             package_files=rel_paths,
             reason=reason,
+            content_manifest=content_manifest,
         )
 
     @staticmethod
@@ -389,6 +458,7 @@ class ArtifactBoundaryGuard:
         if result.is_safe:
             trace = build_trace(ARTIFACT_BOUNDARY_VERIFIED, "ALLOWED")
             manifest = sorted(result.package_files)
+            content_manifest = sorted(result.content_manifest)
             return InfraDiagnosticResult.verified(
                 agent_message="Package boundary verified — safe to publish",
                 developer_fields={
@@ -396,12 +466,18 @@ class ArtifactBoundaryGuard:
                     "is_safe": result.is_safe,
                     "file_count": len(result.package_files),
                     "file_paths": manifest,
+                    "content_manifest": content_manifest,
                     "findings": [f.model_dump() for f in result.findings],
                     "reason": result.reason,
                     "audit_trace": trace,
                     "rule_ids": [ARTIFACT_BOUNDARY_VERIFIED.rule_id],
                 },
-                evidence={**trace, "file_count": len(result.package_files), "file_paths": manifest},
+                evidence={
+                    **trace,
+                    "file_count": len(result.package_files),
+                    "file_paths": manifest,
+                    "content_manifest": content_manifest,
+                },
             )
 
         finding_types = sorted({f.finding_type for f in blocked}, key=ArtifactBoundaryGuard._finding_priority)

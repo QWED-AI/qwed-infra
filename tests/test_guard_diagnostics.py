@@ -912,6 +912,38 @@ class TestArtifactBoundaryGuardToVerificationContext:
         vc2 = make_verified_vc("pkg_two", "beta.py")
         assert vc1.context.evidence.proof_ref != vc2.context.evidence.proof_ref
 
+    def test_content_change_changes_proof_ref(self, tmp_path):
+        """Changing a file at the same path must change the proof_ref.
+
+        Without this, the proof would only bind to paths/count, not contents.
+        """
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "module.py", "content-v1")
+        pyproject = tmp_path / "pyproject.toml"
+        self._write_file(
+            pyproject,
+            "[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\n",
+        )
+        vc_v1 = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(pyproject),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc_v1.verdict == Verdict.VERIFIED
+        # Overwrite the same path with different content -> content_manifest changes
+        self._write_file(pkg / "module.py", "content-v2")
+        vc_v2 = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(pyproject),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc_v2.verdict == Verdict.VERIFIED
+        assert vc_v1.context.evidence.proof_ref != vc_v2.context.evidence.proof_ref
+
     def test_none_package_dir_blocked(self):
         guard = ArtifactBoundaryGuard()
         vc = guard.to_verification_context(
@@ -971,6 +1003,84 @@ class TestArtifactBoundaryGuardToVerificationContext:
         assert payload["developer_fields"]["is_safe"] is False
         finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
         assert "missing_control" in finding_types
+
+    @pytest.mark.parametrize(
+        "packages",
+        [
+            ["/outside/mypkg"],
+            ["mypkg/../../outside"],
+        ],
+    )
+    def test_wheel_absolute_or_traversal_packages_blocked(self, tmp_path, packages):
+        """Reject boundary violations that pass the naive 'name in parts' check."""
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        pkgs_repr = ", ".join(f"'{p}'" for p in packages)
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            f"[tool.hatch.build.targets.wheel]\npackages = [{pkgs_repr}]\n",
+        )
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+
+    @pytest.mark.parametrize(
+        "only_include",
+        [
+            ["/etc/mypkg"],
+            ["mypkg/../../outside"],
+        ],
+    )
+    def test_wheel_absolute_or_traversal_only_include_blocked(self, tmp_path, only_include):
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        oi_repr = ", ".join(f"'{p}'" for p in only_include)
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            f"[tool.hatch.build.targets.wheel]\npackages = ['mypkg']\nonly-include = [{oi_repr}]\n",
+        )
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+
+    def test_unsupported_build_backend_blocked(self, tmp_path):
+        """Non-hatchling explicit backends are denied: wheel boundary cannot be modeled."""
+        guard = ArtifactBoundaryGuard()
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir(parents=True)
+        self._write_file(pkg / "__init__.py")
+        self._write_file(
+            tmp_path / "pyproject.toml",
+            "[build-system]\nbuild-backend = 'setuptools.build_meta'\nrequires = ['setuptools']\n\n[project]\nname = 'mypkg'\nversion = '0.1.0'\n",
+        )
+        vc = guard.to_verification_context(
+            package_dir=str(pkg),
+            pyproject_path=str(tmp_path / "pyproject.toml"),
+            formal_statement=self.FORMAL_STATEMENT,
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        finding_types = [f["finding_type"] for f in payload["developer_fields"]["findings"]]
+        assert "unknown_boundary" in finding_types
 
     @pytest.mark.parametrize(
         "formal_statement",
