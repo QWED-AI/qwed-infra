@@ -17,6 +17,12 @@ from qwed_infra.verification_context import VerificationContextDocument
 
 _ARTIFACT_CONSTRAINT_ID = "artifact_boundary_guard.verify_package_boundary"
 
+# Only build backends whose packaging/wheel rules are fully modeled may be
+# admitted. Everything else (missing, setuptools, flit, hatchling.* spoofing,
+# etc.) is unverifiable -> BLOCKED. Exact-match allowlist: no prefix matching,
+# so "hatchling.malicious" is not accepted.
+_SUPPORTED_BUILD_BACKENDS = frozenset({"hatchling.build"})
+
 SENSITIVE_FILE_PATTERNS = [
     "*.pem", "*.key", "*.pgp", "*.gpg",
     ".env", ".env.*",
@@ -76,24 +82,63 @@ class ArtifactBoundaryGuard:
         return False
 
     @staticmethod
-    def _collect_package_files(package_dir: Path) -> list[Path]:
-        if not package_dir.is_dir():
-            return []
+    def _collect_package_files(package_dir: Path) -> tuple[list[Path], list[ArtifactBoundaryFinding]]:
+        """Collect package files; surface broken symlinks as findings (never silently omitted)."""
+        findings = []
         files = []
-        for f in package_dir.rglob("*"):
+        if not package_dir.is_dir():
+            return files, findings
+        for f in sorted(package_dir.rglob("*")):
+            if f.is_symlink() and not f.exists():
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="unknown_boundary",
+                        severity="BLOCK",
+                        file_path=str(f.relative_to(package_dir)),
+                        reason="Broken symlink in package boundary — target does not exist",
+                    )
+                )
+                continue
             if f.is_file():
                 files.append(f)
-        return sorted(files)
+        return files, findings
 
     @staticmethod
     def _content_manifest(pkg_path: Path, package_files: list[Path]) -> tuple[list[ArtifactBoundaryFinding], list[str]]:
-        """Bind each collected package file to its sha256 content digest (sorted)."""
+        """Bind each collected package file to its sha256 content digest (sorted).
+
+        Every file is strictly resolved first: broken links and targets outside
+        the scanned package_dir are rejected (fail-closed).
+        """
+        resolved_pkg = pkg_path.resolve()
         manifest_items = []
         findings = []
         for f in package_files:
             rel = str(f.relative_to(pkg_path))
             try:
-                digest = hashlib.sha256(f.read_bytes()).hexdigest()
+                resolved = f.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="unknown_boundary",
+                        severity="BLOCK",
+                        file_path=rel,
+                        reason=f"Could not resolve '{rel}' for the artifact manifest — {exc}",
+                    )
+                )
+                return findings, []
+            if resolved != resolved_pkg and resolved_pkg not in resolved.parents:
+                findings.append(
+                    ArtifactBoundaryFinding(
+                        finding_type="unknown_boundary",
+                        severity="BLOCK",
+                        file_path=rel,
+                        reason=f"Package member '{rel}' resolves outside the scanned boundary",
+                    )
+                )
+                return findings, []
+            try:
+                digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
             except OSError as exc:
                 findings.append(
                     ArtifactBoundaryFinding(
@@ -152,12 +197,12 @@ class ArtifactBoundaryGuard:
             return False, f"wheel entry '{entry}' escapes boundary '{package_name}'"
         if package_name not in entry_path.parts:
             return False, f"Package '{package_name}' not referenced by wheel entry '{entry}'"
-        resolved_entry = (base_dir / entry_path).resolve()
-        resolved_boundary = boundary_dir.resolve()
         try:
+            resolved_entry = (base_dir / entry_path).resolve()
+            resolved_boundary = boundary_dir.resolve()
             if resolved_boundary not in resolved_entry.parents and resolved_entry != resolved_boundary:
                 return False, f"wheel entry '{entry}' resolves outside inspected boundary '{package_name}'"
-        except OSError:
+        except (OSError, RuntimeError):
             return False, f"wheel entry '{entry}' could not be resolved within '{package_name}'"
         return True, None
 
@@ -266,7 +311,7 @@ class ArtifactBoundaryGuard:
         return findings
 
     @staticmethod
-    def _check_build_config(pyproject_path: Path, package_name: str) -> list[ArtifactBoundaryFinding]:
+    def _check_build_config(pyproject_path: Path, package_name: str, boundary_dir: Path) -> list[ArtifactBoundaryFinding]:
         findings = []
         pp_name = pyproject_path.name
         if not pyproject_path.is_file():
@@ -303,15 +348,15 @@ class ArtifactBoundaryGuard:
             node = node.get(key, {})
         else:
             wheel = node
-        if backend and not backend.startswith("hatchling"):
+        if backend not in _SUPPORTED_BUILD_BACKENDS:
             findings.append(
                 ArtifactBoundaryFinding(
                     finding_type="unknown_boundary",
                     severity="BLOCK",
                     file_path=pp_name,
                     reason=(
-                        f"Unsupported build backend '{backend}' — packaging rules are "
-                        "not modeled, so the built-wheel boundary cannot be verified"
+                        f"Unsupported or missing build backend '{backend or '<none>'}' — "
+                        "packaging rules are not modeled, so the built-wheel boundary cannot be verified"
                     ),
                 )
             )
@@ -328,7 +373,6 @@ class ArtifactBoundaryGuard:
             return findings
         if not wheel:
             return findings
-        boundary_dir = pyproject_path.parent / package_name
         findings.extend(ArtifactBoundaryGuard._check_wheel_config(wheel, package_name, pp_name, pyproject_path.parent, boundary_dir))
         return findings
 
@@ -357,7 +401,8 @@ class ArtifactBoundaryGuard:
                 reason="Package boundary could not be verified — directory not found",
             )
 
-        package_files = self._collect_package_files(pkg_path)
+        package_files, symlink_findings = self._collect_package_files(pkg_path)
+        findings.extend(symlink_findings)
         rel_paths = [str(f.relative_to(pkg_path)) for f in package_files]
 
         # Bind evidence to contents: hash every collected file, sorted.
@@ -417,7 +462,7 @@ class ArtifactBoundaryGuard:
                     )
                 )
 
-        findings.extend(self._check_build_config(pyproj_path, package_name))
+        findings.extend(self._check_build_config(pyproj_path, package_name, boundary_dir=pkg_path))
 
         is_safe = len(findings) == 0
         if is_safe:
