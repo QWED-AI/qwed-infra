@@ -1,5 +1,5 @@
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from pydantic import BaseModel
 from qwed_infra.audit import (
     COST_BUDGET_EXCEEDED,
@@ -7,8 +7,9 @@ from qwed_infra.audit import (
     COST_WITHIN_BUDGET,
     build_trace,
 )
-from qwed_infra.diagnostics import InfraDiagnosticResult
+from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 from qwed_infra.numeric import decimal_text, parse_decimal_input
+from qwed_infra.verification_context import VerificationContextDocument
 
 _COST_CONSTRAINT_ID = "cost_guard.verify_budget"
 
@@ -265,4 +266,41 @@ class CostGuard:
                 "audit_trace": trace,
             },
             evidence={**trace, "total_monthly_cost": result.total_monthly_cost, "budget": result.budget},
+        )
+
+    def to_verification_context(
+        self,
+        resources: Dict[str, Any],
+        budget_monthly: object,
+        *,
+        formal_statement: str,
+        attestation_token: Optional[str] = None,
+    ) -> VerificationContextDocument:
+        """Run the budget check and map the result to a VC v1.0 document.
+
+        The guard performs the computation itself via verify_budget(), so a
+        caller cannot inject a result object of any kind. The provenance
+        gate remains as defense-in-depth: only a VERIFIED diagnostic
+        carrying CostGuard provenance and an explicit within_budget=True
+        outcome is admitted; anything else is BLOCKED.
+        """
+        result = self.verify_budget(resources, budget_monthly)
+        diagnostic = self.to_diagnostic(result)
+        decision_status = None
+        if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
+            diagnostic.developer_fields.get("constraint_id") == _COST_CONSTRAINT_ID
+            and diagnostic.developer_fields.get("within_budget") is True
+        ):
+            decision_status = InfraDiagnosticStatus.BLOCKED
+
+        from qwed_infra.verification_context_bridge import (
+            verification_context_from_diagnostic_result,
+        )
+
+        return verification_context_from_diagnostic_result(
+            diagnostic,
+            formal_statement=formal_statement,
+            attestation_token=attestation_token,
+            verifier="CostGuard",
+            decision_status=decision_status,
         )
