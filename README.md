@@ -7,6 +7,7 @@
 > "Don't let AI hallucinate your cloud bill to $20,000."
 
 [![Verified by QWED](https://img.shields.io/badge/Verified_by-QWED-00C853?style=flat&logo=checkmarx)](https://github.com/QWED-AI/qwed-infra)
+[![Verification Context](https://img.shields.io/badge/VC-v1.0-6C3FC5?style=flat&logo=docusign)](https://github.com/QWED-AI/qwed-infra#verification-context-v10)
 [![PyPI](https://img.shields.io/pypi/v/qwed-infra?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/qwed-infra/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
@@ -185,6 +186,79 @@ if diagnostic.status.value == "BLOCKED":
 else:
     print("✅ Package boundary verified — safe to ship.")
 ```
+
+---
+
+## 🔏 Verification Context v1.0
+
+Every guard can emit a **Verification Context (VC) document** — a portable, machine-checkable trust artifact that records *what was verified, by whom, with what proof*, and *whether a downstream system should admit or deny*.
+
+### Why VC?
+
+A `True/False` return value is enough for one process — but CI/CD pipelines, release gates, and audit trails need **evidence that travels**:
+
+| Plain result | Verification Context |
+| :--- | :--- |
+| `result.allowed == False` | Signed-off document: claim, verifier identity+version, evidence hash (`proof_ref`), admission decision |
+| Lives only in your process log | JSON-serializable, schema-validated, tamper-evident (`sha256` bound to the evidence) |
+| No story when someone asks "who verified this?" | `proof.verifier`, `audit_trace`, and rule IDs answer it |
+
+The document is **fail-closed by construction**: anything that is not proven is `DENY` — `UNVERIFIABLE` and `BLOCKED` outcomes can never produce `ADMIT`.
+
+### Usage
+
+Each guard runs its own verification internally and returns a VC document. You pass raw inputs — never a pre-computed result object:
+
+```python
+from qwed_infra import NetworkGuard
+
+net = NetworkGuard()
+infra = {
+    "subnets": [{"id": "subnet-web", "security_groups": ["sg-web"]}],
+    "route_tables": [
+        {"subnet_id": "subnet-web", "routes": {"0.0.0.0/0": "igw-main"}},
+    ],
+    "security_groups": {
+        "sg-web": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+    },
+}
+
+doc = net.to_verification_context(
+    infra,                       # raw topology — the guard verifies this itself
+    "internet",
+    "subnet-web",
+    80,
+    formal_statement="Traffic from internet to subnet-web on port 80 is safe",
+    attestation_token="<token>", # optional; without it VERIFIED degrades to UNVERIFIABLE
+)
+
+print(doc.verdict.value)          # -> VERIFIED / BLOCKED / UNVERIFIABLE
+print(doc.context.decision.admission.value)  # -> ADMIT / DENY
+```
+
+The same pattern holds for every guard:
+
+```python
+IamGuard().to_verification_context(policy, action, resource, context, ...)
+CostGuard().to_verification_context(resources, budget_monthly, ...)
+ArtifactBoundaryGuard().to_verification_context(package_dir=..., pyproject_path=..., ...)
+```
+
+### Using VC documents downstream
+
+```python
+document = vc.to_dict()   # JSON-serializable dict
+
+from qwed_infra.verification_context import is_valid_document, resolve_document_proof_ref
+
+if is_valid_document(document):                 # schema + verdict/admission consistency
+    assert resolve_document_proof_ref(document) # proof_ref resolves against the evidence
+    admission = document["context"]["decision"]["admission"]  # ADMIT or DENY
+```
+
+Store or forward `document` anywhere JSON goes — release gates, pipeline artifacts, audit logs. The `proof_ref` binds the decision to the exact evidence that produced it.
+
+> **Roadmap (#47):** today the attestation token is checked for presence; cryptographic validation and claim binding (signature, issuer, expiry, digest binding à la `enforce_trust_decision`) land with the attestation trust boundary milestone.
 
 ---
 
