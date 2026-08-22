@@ -8,7 +8,9 @@ Covers:
 2. resolve_document_proof_ref returns True for VERIFIED documents.
 3. vc.context.decision.admission matches the underlying outcome.
 4. Documents validate against the v1.0 schema for all four guards.
-5. Fail-closed: malformed inputs map to BLOCKED/UNVERIFIABLE (never ADMIT, never raise).
+5. Fail-closed: guard adapters map malformed verifier inputs to BLOCKED/UNVERIFIABLE
+   (never ADMIT, never raise); bridge-level invalid inputs (result type,
+   formal_statement, attestation_token) raise VerificationContextValidationError.
 """
 
 from pathlib import Path
@@ -47,8 +49,11 @@ def _iam_allow_inputs():
 
 def _iam_deny_inputs():
     return {
-        "policy": {"Statement": [{"Effect": "Allow", "Action": "s3:PutObject", "Resource": "*"}]},
-        "action": "s3:DeleteBucket",
+        "policy": {"Statement": [
+            {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"},
+            {"Effect": "Deny", "Action": "s3:GetObject", "Resource": "*"},
+        ]},
+        "action": "s3:GetObject",
         "resource": "*",
     }
 
@@ -71,8 +76,16 @@ def _network_reachable_inputs():
 
 
 def _network_blocked_inputs():
+    """Ingress allows TCP/80 but no route internet -> subnet-a. Isolates denial
+    from graph reachability traversal, not port matching."""
     return {
-        "resources": {"subnets": [{"id": "subnet-a", "security_groups": []}]},
+        "resources": {
+            "subnets": [{"id": "subnet-a", "security_groups": ["sg-allow-http"]}],
+            "route_tables": [],
+            "security_groups": {
+                "sg-allow-http": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]}
+            },
+        },
         "source": "internet",
         "destination": "subnet-a",
         "port": 80,
@@ -89,6 +102,14 @@ def _cost_within_budget_inputs():
 def _cost_exceeds_budget_inputs():
     return {
         "resources": {"instances": [{"id": "gpu", "instance_type": "p4d.24xlarge", "count": 1}]},
+        "budget_monthly": "100.00",
+    }
+
+
+def _cost_unknown_type_inputs():
+    """Unknown instance type must fail closed (within_budget=False -> DENY)."""
+    return {
+        "resources": {"instances": [{"id": "gpu", "instance_type": "g6.xlarge", "count": 1}]},
         "budget_monthly": "100.00",
     }
 
@@ -201,12 +222,13 @@ class TestBridgeMalformedInputs:
     def test_invalid_formal_statement_rejected(self, formal_statement):
         from qwed_infra.verification_context import VerificationContextValidationError
 
+        result = InfraDiagnosticResult.blocked(
+            agent_message="blocked",
+            developer_fields={"constraint_id": "conformance"},
+        )
         with pytest.raises(VerificationContextValidationError):
             verification_context_from_diagnostic_result(
-                InfraDiagnosticResult.blocked(
-                    agent_message="blocked",
-                    developer_fields={"constraint_id": "conformance"},
-                ),
+                result,
                 formal_statement=formal_statement,
                 verifier="Conformance",
             )
@@ -215,13 +237,14 @@ class TestBridgeMalformedInputs:
     def test_invalid_attestation_rejected(self, bad_token):
         from qwed_infra.verification_context import VerificationContextValidationError
 
+        result = InfraDiagnosticResult.verified(
+            agent_message="verified",
+            developer_fields={"constraint_id": "conformance", "audit_trace": {"rule_id": "R", "outcome": "ALLOWED"}},
+            evidence={"constraint_id": "conformance"},
+        )
         with pytest.raises(VerificationContextValidationError):
             verification_context_from_diagnostic_result(
-                InfraDiagnosticResult.verified(
-                    agent_message="verified",
-                    developer_fields={"constraint_id": "conformance", "audit_trace": {"rule_id": "R", "outcome": "ALLOWED"}},
-                    evidence={"constraint_id": "conformance"},
-                ),
+                result,
                 formal_statement=FORMAL_STATEMENT,
                 verifier="Conformance",
                 attestation_token=bad_token,
@@ -318,6 +341,21 @@ class TestGuardViolationConformance:
         assert vc.verdict == Verdict.BLOCKED
         assert vc.context.evidence.proof_ref is None
         assert is_valid_document(vc.to_dict()) is True
+
+    def test_unknown_instance_type_fails_closed(self):
+        """Unknown instance type must yield within_budget=False in the VC (DENY)."""
+        guard = CostGuard()
+        vc = guard.to_verification_context(
+            **_cost_unknown_type_inputs(),
+            formal_statement=FORMAL_STATEMENT,
+            attestation_token=ATTESTATION,
+        )
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["within_budget"] is False
+        assert payload["developer_fields"]["has_unknown_types"] is True
 
 
 # ----------------------------------------------------------------------
