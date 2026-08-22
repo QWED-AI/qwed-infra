@@ -454,6 +454,54 @@ class TestNetworkGuardToVerificationContext:
         assert serialized == ["internet", "subnet-a"]
 
     @pytest.mark.parametrize(
+        "resources",
+        [
+            None,
+            "not-a-dict",
+            42,
+            {"subnets": None},
+            {"subnets": "not-a-list"},
+            {"subnets": [{"no-id": "subnet-a"}]},
+            {"subnets": [{"id": "subnet-a"}], "route_tables": None},
+        ],
+    )
+    def test_malformed_resources_blocked(self, resources):
+        """Fail-closed on malformed topology inputs (no raised exception)."""
+        guard = NetworkGuard()
+        vc = guard.to_verification_context(
+            resources,
+            "internet",
+            "subnet-a",
+            80,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        assert is_valid_document(vc.to_dict()) is True
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["reachable"] is False
+
+    def test_invalid_input_audit_trace(self):
+        """Malformed inputs produce an INVALID_INPUT audit outcome."""
+        guard = NetworkGuard()
+        vc = guard.to_verification_context(
+            None,
+            "internet",
+            "subnet-a",
+            80,
+            formal_statement="Traffic from internet to subnet-a on port 80 is safe",
+            attestation_token=self._attestation_token(),
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        payload = vc.context.evidence.payload
+        assert payload["developer_fields"]["audit_trace"]["outcome"] == "INVALID_INPUT"
+        assert payload["developer_fields"]["constraint_id"] == "network_guard.verify_reachability"
+
+    @pytest.mark.parametrize(
         "formal_statement",
         [
             "",

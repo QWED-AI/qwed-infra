@@ -289,13 +289,27 @@ class NetworkGuard:
         """Run the reachability check and map the result to a VC v1.0 document.
 
         The guard performs the computation itself via verify_reachability(),
-        so a caller cannot inject a result object of any kind. The
-        provenance gate remains as defense-in-depth: only a VERIFIED
+        so a caller cannot inject a result object of any kind. Malformed
+        inputs (non-dict resources, missing subnet "id" keys, etc.) map to a
+        fail-closed BLOCKED diagnostic rather than propagating an exception.
+        The provenance gate remains as defense-in-depth: only a VERIFIED
         diagnostic carrying NetworkGuard provenance and an explicit
         reachable=True outcome is admitted; anything else is BLOCKED.
         """
-        result = self.verify_reachability(resources, source, destination, port)
-        diagnostic = self.to_diagnostic(result)
+        try:
+            result = self.verify_reachability(resources, source, destination, port)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            diagnostic = InfraDiagnosticResult.blocked(
+                agent_message="Network reachability could not be verified",
+                developer_fields={
+                    "constraint_id": _NETWORK_CONSTRAINT_ID,
+                    "reachable": False,
+                    "reason": "Invalid inputs to the reachability check — fail closed",
+                    "audit_trace": build_trace(NETWORK_UNSUPPORTED_TOPOLOGY, "INVALID_INPUT"),
+                },
+            )
+        else:
+            diagnostic = self.to_diagnostic(result)
         decision_status = None
         if diagnostic.status is InfraDiagnosticStatus.VERIFIED and not (
             diagnostic.developer_fields.get("constraint_id") == _NETWORK_CONSTRAINT_ID
