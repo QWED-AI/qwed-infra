@@ -238,7 +238,8 @@ print(doc.verdict.value)          # -> VERIFIED / BLOCKED / UNVERIFIABLE
 print(doc.context.decision.admission.value)  # -> ADMIT / DENY
 ```
 
-The same pattern holds for every guard (`formal_statement` is keyword-only and required):
+The same pattern holds for every guard (`formal_statement` is keyword-only and required).
+Schematic — define `policy`/`resources` etc. as in the guard examples above:
 
 ```python
 IamGuard().to_verification_context(policy, action, resource, context,
@@ -268,11 +269,12 @@ if admission == "ADMIT":
         raise ValueError("VC document proof_ref does not resolve — reject")
     # ... proceed with the gated operation ...
 else:
-    # DENY: fail closed. BLOCKED/UNVERIFIABLE documents carry no proof_ref by design.
+    # DENY: fail closed. BLOCKED/UNVERIFIABLE documents do not require
+    # context.evidence.proof_ref (diagnostic proof hashes are separate).
     raise PermissionError(f"Verification denied ({document['verdict']}) — reject")
 ```
 
-Store or forward `document` anywhere JSON goes — release gates, pipeline artifacts, audit logs. The `proof_ref` binds a VERIFIED decision to the exact evidence that produced it.
+Store or forward `document` anywhere JSON goes — release gates, pipeline artifacts, audit logs. The `proof_ref` binds a VERIFIED decision to the exact evidence that produced it. VC evidence can contain sensitive infrastructure, policy, or cost data — apply your own access control, redaction, and retention rules when storing or forwarding documents downstream.
 
 > **Roadmap (#47):** today the attestation token is checked for **presence only**; cryptographic validation and claim binding (signature, issuer, expiry, digest binding à la `enforce_trust_decision`) land with the attestation trust boundary milestone.
 
