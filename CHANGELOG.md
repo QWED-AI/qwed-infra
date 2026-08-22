@@ -15,7 +15,7 @@
 ### Fixed
 - Fail-closed on malformed inputs at every VC boundary: undecimal budgets, extreme Decimal values, non-string build backends, malformed topology/policy/package inputs, symlink escapes/loops, wheel entries outside the scanned boundary — all map to BLOCKED/DENY documents instead of exceptions or guessed approval (#48, #49/PR #51, #50)
 - ArtifactBoundaryGuard proof binding: content manifests (per-file sha256), package identity derived from the inspected directory, exact-match backend allowlist (#47 follow-ups in PR #50)
-- IAM verified-denial results demote to BLOCKED (never ADMIT); verified IAM denials preserve their diagnostic proof reference in the document evidence
+- IAM verified-denial results demote to BLOCKED (never ADMIT); the diagnostic's own proof hash is preserved inside the evidence payload (`diagnostic_proof_ref`), while the document-level `evidence.proof_ref` stays null for every DENY decision (fail-closed contract)
 
 ## [0.2.0] - 2026-07-02
 

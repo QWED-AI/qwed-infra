@@ -199,11 +199,11 @@ A `True/False` return value is enough for one process — but CI/CD pipelines, r
 
 | Plain result | Verification Context |
 | :--- | :--- |
-| `result.allowed == False` | Signed-off document: claim, verifier identity+version, evidence hash (`proof_ref`), admission decision |
-| Lives only in your process log | JSON-serializable, schema-validated, tamper-evident (`sha256` bound to the evidence) |
+| `result.allowed == False` | Document: claim, verifier identity+version, hash-linked evidence (`proof_ref`), admission decision |
+| Lives only in your process log | JSON-serializable, schema-validated, evidence-bound (`sha256` proof_ref computed over the exact evidence) |
 | No story when someone asks "who verified this?" | `proof.verifier`, `audit_trace`, and rule IDs answer it |
 
-The document is **fail-closed by construction**: anything that is not proven is `DENY` — `UNVERIFIABLE` and `BLOCKED` outcomes can never produce `ADMIT`.
+The document is **fail-closed by construction**: anything that is not proven is `DENY` — `UNVERIFIABLE` and `BLOCKED` outcomes can never produce `ADMIT`. Note that in v1.0 the attestation token is checked for **presence only** — cryptographic validation (signature/issuer/expiry/claim binding) lands with #47.
 
 ### Usage
 
@@ -229,36 +229,52 @@ doc = net.to_verification_context(
     "subnet-web",
     80,
     formal_statement="Traffic from internet to subnet-web on port 80 is safe",
-    attestation_token="<token>", # optional; without it VERIFIED degrades to UNVERIFIABLE
+    # optional; v1.0 checks PRESENCE only (any non-empty string). Without it,
+    # VERIFIED degrades to UNVERIFIABLE. Cryptographic validation: #47.
+    attestation_token="my-release-attestation-v1",
 )
 
 print(doc.verdict.value)          # -> VERIFIED / BLOCKED / UNVERIFIABLE
 print(doc.context.decision.admission.value)  # -> ADMIT / DENY
 ```
 
-The same pattern holds for every guard:
+The same pattern holds for every guard (`formal_statement` is keyword-only and required):
 
 ```python
-IamGuard().to_verification_context(policy, action, resource, context, ...)
-CostGuard().to_verification_context(resources, budget_monthly, ...)
-ArtifactBoundaryGuard().to_verification_context(package_dir=..., pyproject_path=..., ...)
+IamGuard().to_verification_context(policy, action, resource, context,
+                                   formal_statement="IAM policy is safe to apply")
+CostGuard().to_verification_context(resources, budget_monthly,
+                                    formal_statement="Estimated cost is within budget")
+ArtifactBoundaryGuard().to_verification_context(package_dir="mypkg", pyproject_path="pyproject.toml",
+                                                formal_statement="Package boundary is safe to publish")
 ```
 
 ### Using VC documents downstream
 
 ```python
-document = vc.to_dict()   # JSON-serializable dict
-
 from qwed_infra.verification_context import is_valid_document, resolve_document_proof_ref
 
-if is_valid_document(document):                 # schema + verdict/admission consistency
-    assert resolve_document_proof_ref(document) # proof_ref resolves against the evidence
-    admission = document["context"]["decision"]["admission"]  # ADMIT or DENY
+document = doc.to_dict()   # JSON-serializable dict
+
+if not is_valid_document(document):
+    raise ValueError("Invalid VC document — reject")   # schema/verdict inconsistency
+
+admission = document["context"]["decision"]["admission"]   # ADMIT or DENY
+
+if admission == "ADMIT":
+    # VERIFIED documents carry a proof_ref bound to the exact evidence;
+    # require that it resolves before trusting the decision.
+    if not resolve_document_proof_ref(document):
+        raise ValueError("VC document proof_ref does not resolve — reject")
+    # ... proceed with the gated operation ...
+else:
+    # DENY: fail closed. BLOCKED/UNVERIFIABLE documents carry no proof_ref by design.
+    raise PermissionError(f"Verification denied ({document['verdict']}) — reject")
 ```
 
-Store or forward `document` anywhere JSON goes — release gates, pipeline artifacts, audit logs. The `proof_ref` binds the decision to the exact evidence that produced it.
+Store or forward `document` anywhere JSON goes — release gates, pipeline artifacts, audit logs. The `proof_ref` binds a VERIFIED decision to the exact evidence that produced it.
 
-> **Roadmap (#47):** today the attestation token is checked for presence; cryptographic validation and claim binding (signature, issuer, expiry, digest binding à la `enforce_trust_decision`) land with the attestation trust boundary milestone.
+> **Roadmap (#47):** today the attestation token is checked for **presence only**; cryptographic validation and claim binding (signature, issuer, expiry, digest binding à la `enforce_trust_decision`) land with the attestation trust boundary milestone.
 
 ---
 
