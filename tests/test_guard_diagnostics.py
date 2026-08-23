@@ -73,9 +73,18 @@ class TestIamGuardToVerificationContext:
     def _unverifiable_policy():
         return {"Statement": [{"Effect": "Allow", "Action": 123, "Resource": "*"}]}
 
-    @staticmethod
-    def _attestation_token():
-        return "attestation-fixture-opaque"
+    def _attestation_token(self):
+        """Mint a valid #47 attestation bound to the canonical allow diagnostic."""
+        from qwed_infra.attestation import mint_diagnostic_attestation
+
+        guard = IamGuard()
+        result = guard.verify_access(self._allow_policy(), "s3:GetObject", "*")
+        diagnostic = IamGuard.to_diagnostic(result)
+        att = mint_diagnostic_attestation(
+            diagnostic, engine="IamGuard", query="IAM policy is safe to apply"
+        )
+        assert att.is_issued
+        return att.token
 
     def test_verified_with_attestation(self):
         guard = IamGuard()
@@ -308,9 +317,20 @@ class TestNetworkGuardToVerificationContext:
     def _no_route_resources():
         return {"subnets": [{"id": "subnet-a", "security_groups": []}]}
 
-    @staticmethod
-    def _attestation_token():
-        return "attestation-fixture-opaque"
+    def _attestation_token(self):
+        """Mint a valid #47 attestation bound to the canonical reachable diagnostic."""
+        from qwed_infra.attestation import mint_diagnostic_attestation
+
+        guard = NetworkGuard()
+        result = guard.verify_reachability(self._reachable_resources(), "internet", "subnet-a", 80)
+        diagnostic = NetworkGuard.to_diagnostic(result)
+        att = mint_diagnostic_attestation(
+            diagnostic,
+            engine="NetworkGuard",
+            query="Traffic from internet to subnet-a on port 80 is safe",
+        )
+        assert att.is_issued
+        return att.token
 
     def test_reachable_with_attestation(self):
         guard = NetworkGuard()
@@ -619,9 +639,20 @@ class TestCostGuardToVerificationContext:
     def _unknown_type_resources():
         return {"instances": [{"id": "gpu-1", "instance_type": "g6.xlarge", "count": 1}]}
 
-    @staticmethod
-    def _attestation_token():
-        return "attestation-fixture-opaque"
+    def _attestation_token(self):
+        """Mint a valid #47 attestation bound to the canonical within-budget diagnostic."""
+        from qwed_infra.attestation import mint_diagnostic_attestation
+
+        guard = CostGuard()
+        result = guard.verify_budget(self._within_budget_resources(), "100.00")
+        diagnostic = CostGuard.to_diagnostic(result)
+        att = mint_diagnostic_attestation(
+            diagnostic,
+            engine="CostGuard",
+            query="Estimated monthly cost is within the approved budget",
+        )
+        assert att.is_issued
+        return att.token
 
     def test_within_budget_with_attestation(self):
         guard = CostGuard()
@@ -831,9 +862,28 @@ class TestCostGuardToVerificationContext:
 class TestArtifactBoundaryGuardToVerificationContext:
     FORMAL_STATEMENT = "Package boundary is safe to publish"
 
-    @staticmethod
-    def _attestation_token():
-        return "attestation-fixture-opaque"
+    def _attestation_token(self, guard=None, pkg=None, pyproject=None):
+        """Mint a valid #47 attestation bound to this package's diagnostic.
+
+        Called without arguments only in tests that expect a fail-closed
+        verdict, where the token value is irrelevant (non-VERIFIED decisions
+        never reach attestation enforcement).
+        """
+        from qwed_infra.attestation import mint_diagnostic_attestation
+
+        if guard is None:
+            return "attestation-fixture-opaque"
+        result = guard.verify_package_boundary(
+            package_dir=str(pkg), pyproject_path=pyproject, package_name=Path(str(pkg)).name
+        )
+        diagnostic = ArtifactBoundaryGuard.to_diagnostic(result)
+        att = mint_diagnostic_attestation(
+            diagnostic,
+            engine="ArtifactBoundaryGuard",
+            query=self.FORMAL_STATEMENT,
+        )
+        assert att.is_issued
+        return att.token
 
     @staticmethod
     def _write_file(path: Path, content: str = ""):
@@ -858,7 +908,7 @@ class TestArtifactBoundaryGuardToVerificationContext:
             package_dir=str(pkg),
             pyproject_path=pyproject,
             formal_statement=self.FORMAL_STATEMENT,
-            attestation_token=self._attestation_token(),
+            attestation_token=self._attestation_token(guard, pkg, pyproject),
         )
         assert vc.verdict == Verdict.VERIFIED
         assert vc.context.decision.admission == Admission.ADMIT
@@ -922,7 +972,7 @@ class TestArtifactBoundaryGuardToVerificationContext:
             package_dir=str(pkg),
             pyproject_path=pyproject,
             formal_statement=self.FORMAL_STATEMENT,
-            attestation_token=self._attestation_token(),
+            attestation_token=self._attestation_token(guard, pkg, pyproject),
         )
         payload = vc.context.evidence.payload
         assert payload["developer_fields"]["constraint_id"] == "artifact_boundary_guard.verify_package_boundary"
@@ -948,11 +998,12 @@ class TestArtifactBoundaryGuardToVerificationContext:
                 pyproj,
                 f"[build-system]\nrequires = ['hatchling']\nbuild-backend = 'hatchling.build'\n\n[tool.hatch.build.targets.wheel]\npackages = ['{name}']\n",
             )
+            token = self._attestation_token(guard, pkg, str(pyproj))
             return guard.to_verification_context(
                 package_dir=str(pkg),
                 pyproject_path=str(pyproj),
                 formal_statement=self.FORMAL_STATEMENT,
-                attestation_token=self._attestation_token(),
+                attestation_token=token,
             )
 
         # Same count, different path -> different manifest -> different proof_ref
@@ -978,7 +1029,7 @@ class TestArtifactBoundaryGuardToVerificationContext:
             package_dir=str(pkg),
             pyproject_path=str(pyproject),
             formal_statement=self.FORMAL_STATEMENT,
-            attestation_token=self._attestation_token(),
+            attestation_token=self._attestation_token(guard, pkg, str(pyproject)),
         )
         assert vc_v1.verdict == Verdict.VERIFIED
         # Overwrite the same path with different content -> content_manifest changes
@@ -987,7 +1038,7 @@ class TestArtifactBoundaryGuardToVerificationContext:
             package_dir=str(pkg),
             pyproject_path=str(pyproject),
             formal_statement=self.FORMAL_STATEMENT,
-            attestation_token=self._attestation_token(),
+            attestation_token=self._attestation_token(guard, pkg, str(pyproject)),
         )
         assert vc_v2.verdict == Verdict.VERIFIED
         assert vc_v1.context.evidence.proof_ref != vc_v2.context.evidence.proof_ref

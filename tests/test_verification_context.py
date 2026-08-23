@@ -781,12 +781,16 @@ class TestBridge:
         )
 
     def test_verified_with_attestation(self):
+        from qwed_infra.attestation import mint_diagnostic_attestation
+
         result = self._verified_result()
+        att = mint_diagnostic_attestation(result, engine="IamGuard", query="test claim")
+        assert att.is_issued
         vc = verification_context_from_diagnostic_result(
             result,
             formal_statement="test claim",
             verifier="IamGuard",
-            attestation_token="fake-jwt",
+            attestation_token=att.token,
         )
         assert vc.verdict == Verdict.VERIFIED
         assert vc.context.decision.admission == Admission.ADMIT
@@ -796,6 +800,19 @@ class TestBridge:
         doc_dict = vc.to_dict()
         # The document's own proof_ref must resolve against itself
         assert resolve_document_proof_ref(doc_dict) is True
+
+    def test_verified_with_forged_token_blocked(self):
+        """#47: an arbitrary non-empty string no longer grants ADMIT."""
+        result = self._verified_result()
+        vc = verification_context_from_diagnostic_result(
+            result,
+            formal_statement="test claim",
+            verifier="IamGuard",
+            attestation_token="fake-jwt",
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
 
     def test_verified_without_attestation(self):
         result = self._verified_result()
@@ -965,16 +982,19 @@ class TestBridgeEdgeCases:
         assert vc.verdict == Verdict.BLOCKED
 
     def test_evidence_excludes_proof_ref_from_payload(self):
+        from qwed_infra.attestation import mint_diagnostic_attestation
+
         result = InfraDiagnosticResult.verified(
             agent_message="test",
             developer_fields={"test": 1, "audit_trace": {"rule": "x"}},
             evidence={"test": 1},
         )
+        att = mint_diagnostic_attestation(result, engine="TestGuard", query="test")
         vc = verification_context_from_diagnostic_result(
             result,
             formal_statement="test",
             verifier="TestGuard",
-            attestation_token="fake-jwt",
+            attestation_token=att.token,
         )
         ref_in_doc = vc.context.evidence.proof_ref
         assert ref_in_doc is not None

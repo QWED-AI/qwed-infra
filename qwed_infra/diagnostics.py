@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -98,6 +98,11 @@ class InfraDiagnosticResult:
     agent_message: str
     developer_fields: Dict[str, Any] = field(default_factory=dict)
     proof_ref: Optional[str] = None
+    # Canonical evidence string whose sha256 == proof_ref (VERIFIED only).
+    # Retained so attestations can bind qwed.proof_hash to this exact
+    # evidence commitment (issue #47), mirroring qwed-verification's
+    # proof_data=str(evidence) issuance flow.
+    proof_data: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, InfraDiagnosticStatus):
@@ -232,11 +237,18 @@ class InfraDiagnosticResult:
         developer_fields: Dict[str, Any],
         evidence: Dict[str, Any],
     ) -> "InfraDiagnosticResult":
+        try:
+            payload = json.dumps(evidence, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Proof evidence must be JSON-serializable for proof_ref hashing: {exc}"
+            ) from exc
         return cls(
             status=InfraDiagnosticStatus.VERIFIED,
             agent_message=agent_message,
             developer_fields=developer_fields,
-            proof_ref=compute_proof_ref(evidence),
+            proof_ref=f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}",
+            proof_data=payload,
         )
 
     @classmethod
@@ -271,4 +283,211 @@ __all__ = [
     "InfraDiagnosticResult",
     "InfraAdvisoryCheck",
     "compute_proof_ref",
+    "enforce_trust_decision",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Trust boundary enforcement — consumption-side attestation validation (#47).
+# Mirrors qwed-verification's enforce_trust_decision: no trust-boundary path
+# can return/consume effective VERIFIED without a required attestation artifact.
+# ---------------------------------------------------------------------------
+
+def _compute_query_hash(query: str) -> str:
+    """Compute a query hash in the same format as AttestationService._hash_content."""
+    return f"sha256:{hashlib.sha256(query.encode('utf-8')).hexdigest()}"
+
+
+def _verify_attestation_token(
+    attestation_token: str,
+    trusted_issuers: Optional[List[str]],
+    result: "InfraDiagnosticResult",
+    policy: str,
+) -> "InfraDiagnosticResult | tuple[bool, Dict[str, Any], Optional[str]]":
+    """Verify the attestation token. Returns (is_valid, claims, error) or a blocked result."""
+    try:
+        from .attestation import get_attestation_service
+
+        service = get_attestation_service()
+        is_valid, token_claims, error = service.verify_attestation(
+            attestation_token,
+            trusted_issuers=trusted_issuers,
+        )
+    except Exception as exc:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — proof artifact verification failed",
+            developer_fields={
+                "constraint_id": "trust_gate.attestation_verification_error",
+                "error": str(exc),
+                "policy": policy,
+                "verdict_status": result.status.value,
+                "verdict_proof_ref": result.proof_ref,
+            },
+        )
+
+    if not is_valid:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — proof artifact invalid",
+            developer_fields={
+                "constraint_id": "trust_gate.invalid_attestation_token",
+                "validation_error": error,
+                "policy": policy,
+                "verdict_status": result.status.value,
+                "verdict_proof_ref": result.proof_ref,
+            },
+        )
+
+    return is_valid, token_claims, error
+
+
+def _validate_attestation_claims(
+    result: "InfraDiagnosticResult",
+    token_claims: Dict[str, Any],
+    query: Optional[str],
+    policy: str,
+) -> Optional["InfraDiagnosticResult"]:
+    """Validate token claims against result. Returns a blocked result or None.
+
+    Binding checks (all must hold for VERIFIED to survive enforcement):
+    - qwed.result.status == result.status          (attested outcome matches)
+    - qwed.query_hash   == sha256(formal_statement) (attested claim matches the
+      formal statement — closes the statement-overclaim vector)
+    - qwed.proof_hash   == result.proof_ref         (attested evidence hash matches
+      the diagnostic's evidence commitment)
+    """
+    raw_qwed = (token_claims or {}).get("qwed")
+    qwed_claims = raw_qwed if isinstance(raw_qwed, dict) else None
+    raw_result_claims = qwed_claims.get("result") if qwed_claims else None
+    result_claims = raw_result_claims if isinstance(raw_result_claims, dict) else None
+    if result_claims is None:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation claims missing or malformed",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_missing",
+                "policy": policy,
+            },
+        )
+
+    token_status = result_claims.get("status")
+    if token_status != result.status.value:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation claims do not match result status",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_status_mismatch",
+                "token_status": token_status,
+                "result_status": result.status.value,
+                "policy": policy,
+            },
+        )
+
+    if query is not None:
+        expected_query_hash = _compute_query_hash(query)
+        token_query_hash = qwed_claims.get("query_hash")
+        if token_query_hash != expected_query_hash:
+            return InfraDiagnosticResult.blocked(
+                agent_message="Verification blocked — attestation query hash does not match",
+                developer_fields={
+                    "constraint_id": "trust_gate.claims_query_mismatch",
+                    "expected_query_hash": expected_query_hash,
+                    "token_query_hash": token_query_hash,
+                    "policy": policy,
+                },
+            )
+
+    token_proof_hash = qwed_claims.get("proof_hash")
+    if token_proof_hash != result.proof_ref:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation proof hash does not match result",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_proof_mismatch",
+                "token_proof_hash": token_proof_hash,
+                "result_proof_ref": result.proof_ref,
+                "policy": policy,
+            },
+        )
+
+    return None
+
+
+def enforce_trust_decision(
+    result: InfraDiagnosticResult,
+    *,
+    attestation_token: Optional[str] = None,
+    require_attestation: bool = True,
+    trusted_issuers: Optional[List[str]] = None,
+    query: Optional[str] = None,
+) -> InfraDiagnosticResult:
+    """Enforce trust-boundary gate: VERIFIED without required attestation → BLOCKED.
+
+    Single enforcement point for consumption-side attestation validation
+    (mirrors qwed-verification). Every admission decision MUST route VERIFIED
+    results through this function before admitting.
+
+    Args:
+        result: The verification InfraDiagnosticResult from the guard.
+        attestation_token: JWT attestation token from
+            attestation.create_verification_attestation. May be None.
+        require_attestation: If True (default), VERIFIED without a valid
+            attestation token fails closed (caller maps it per policy).
+        trusted_issuers: Optional list of trusted issuer DIDs.
+        query: Formal statement for query_hash binding validation. When given,
+            the token's qwed.query_hash must equal sha256(query) — binding the
+            attestation to the exact claim, so overclaiming statements fail.
+
+    Returns:
+        The original InfraDiagnosticResult if all checks pass, or a BLOCKED
+        InfraDiagnosticResult on any failure (missing/invalid token, mismatched
+        claims). Fail-closed statuses pass through unchanged.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    policy = "mandatory" if require_attestation else "optional"
+
+    # Deep-copy detach: the caller keeps a mutable dict; validation and any
+    # returned result must not alias caller-mutable state.
+    try:
+        import copy as _copy
+
+        result = replace(result, developer_fields=_copy.deepcopy(result.developer_fields))
+    except Exception as exc:
+        logger.warning(
+            "trust_gate.blocked reason=diagnostic_snapshot_failed policy=%s error_type=%s",
+            policy,
+            type(exc).__name__,
+        )
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — diagnostic snapshot failed",
+            developer_fields={
+                "constraint_id": "trust_gate.diagnostic_snapshot_failed",
+                "policy": policy,
+            },
+        )
+
+    if result.is_fail_closed:
+        return result
+
+    if not attestation_token:
+        if not require_attestation:
+            return result
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — proof artifact missing",
+            developer_fields={
+                "constraint_id": "trust_gate.mandatory_attestation_missing",
+                "missing": "attestation_token",
+                "policy": policy,
+                "verdict_status": result.status.value,
+                "verdict_proof_ref": result.proof_ref,
+            },
+        )
+
+    verification = _verify_attestation_token(attestation_token, trusted_issuers, result, policy)
+    if isinstance(verification, InfraDiagnosticResult):
+        return verification
+    _is_valid, token_claims, _error = verification
+
+    validation = _validate_attestation_claims(result, token_claims, query, policy)
+    if validation is not None:
+        return validation
+
+    return result
