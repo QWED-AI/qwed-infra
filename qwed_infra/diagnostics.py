@@ -110,13 +110,13 @@ def _validated_proof_pair(proof_ref: Any, proof_data: Any) -> Optional[str]:
     otherwise skip validation and allow a tampered pair through.
     """
     if proof_data is not None and not isinstance(proof_data, str):
-        raise ValueError("from_dict: 'proof_data' must be a string or None.")
+        raise ValueError("'proof_data' must be a string or None.")
     if proof_ref is not None and proof_data is not None:
         expected = f"sha256:{hashlib.sha256(proof_data.encode('utf-8')).hexdigest()}"
         if expected != proof_ref:
             raise ValueError(
-                "from_dict: 'proof_data' does not commit to 'proof_ref' — "
-                "serialized diagnostic is inconsistent."
+                "'proof_data' does not commit to 'proof_ref' — "
+                "the diagnostic's evidence commitment is inconsistent."
             )
     return proof_data
 
@@ -165,6 +165,17 @@ class InfraDiagnosticResult:
                 raise ValueError(
                     "VERIFIED status requires 'audit_trace' in developer_fields — "
                     "a proved claim must reference its audit trace."
+                )
+            # #47 proof commitment: proof_data must be present and hash to
+            # proof_ref on EVERY construction path (factory, from_dict, direct),
+            # so serialized evidence can never diverge from the attested
+            # commitment. The dataclass is frozen, which prevents later mutation.
+            _validated_proof_pair(self.proof_ref, self.proof_data)
+            if not isinstance(self.proof_data, str) or not self.proof_data:
+                raise ValueError(
+                    "VERIFIED status requires non-empty proof_data — the canonical "
+                    "evidence string that commits to proof_ref. Attestations bind "
+                    "qwed.proof_hash to it (#47)."
                 )
 
         if self.status is not InfraDiagnosticStatus.VERIFIED and self.proof_ref is not None:

@@ -154,11 +154,18 @@ def _extract_attested_identity(token_claims):
 
 
 def _build_evidence_payload(result):
-    """Deep-copy result dict, move diagnostic proof_ref to nested key."""
+    """Deep-copy result dict, move internal proof fields out of the payload.
+
+    proof_ref becomes the nested diagnostic_proof_ref; proof_data is dropped
+    entirely — it is an issuance aid for minting attestations, not document
+    evidence, and duplicating the canonical evidence JSON inside the payload
+    would bloat every VERIFIED document.
+    """
     evidence_payload = copy.deepcopy(result.to_dict())
     diagnostic_proof_ref = evidence_payload.pop("proof_ref", None)
     if diagnostic_proof_ref is not None:
         evidence_payload["diagnostic_proof_ref"] = diagnostic_proof_ref
+    evidence_payload.pop("proof_data", None)
     return evidence_payload
 
 

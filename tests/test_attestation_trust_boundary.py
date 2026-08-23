@@ -8,6 +8,7 @@ Mirrors qwed-verification's fail-closed attestation contract:
 - statement overclaims break query_hash binding -> DENY
 """
 
+import pytest
 
 from qwed_infra.attestation import (
     AttestationService,
@@ -20,6 +21,52 @@ from qwed_infra.guards.network_guard import NetworkGuard
 from qwed_infra.verification_context import Admission, Verdict
 
 STATEMENT = "The verified claim"
+
+
+class TestProofDataCommitmentEnforced:
+    """#47: proof_data must commit to proof_ref on EVERY construction path."""
+
+    def test_direct_construction_mismatched_proof_data_rejected(self):
+        from qwed_infra.diagnostics import InfraDiagnosticStatus
+
+        with pytest.raises(ValueError):
+            InfraDiagnosticResult(
+                status=InfraDiagnosticStatus.VERIFIED,
+                agent_message="v",
+                developer_fields={"audit_trace": {"rule_id": "R"}},
+                proof_ref="sha256:" + "0" * 64,
+                proof_data='{"altered": true}',
+            )
+
+    def test_direct_construction_empty_proof_data_rejected(self):
+        from qwed_infra.diagnostics import InfraDiagnosticStatus
+
+        with pytest.raises(ValueError):
+            InfraDiagnosticResult(
+                status=InfraDiagnosticStatus.VERIFIED,
+                agent_message="v",
+                developer_fields={"audit_trace": {"rule_id": "R"}},
+                proof_ref="sha256:" + "0" * 64,
+                proof_data="",
+            )
+
+    def test_direct_construction_missing_proof_data_rejected(self):
+        from qwed_infra.diagnostics import InfraDiagnosticStatus
+
+        with pytest.raises(ValueError):
+            InfraDiagnosticResult(
+                status=InfraDiagnosticStatus.VERIFIED,
+                agent_message="v",
+                developer_fields={"audit_trace": {"rule_id": "R"}},
+                proof_ref="sha256:" + "0" * 64,
+            )
+
+    def test_matching_commitment_accepted(self):
+        result = _verified_diagnostic()
+        assert result.proof_data is not None
+        # round-trip through serialization keeps the pair valid
+        restored = InfraDiagnosticResult.from_dict(result.to_dict())
+        assert restored.proof_data == result.proof_data
 
 
 def _verified_diagnostic():
