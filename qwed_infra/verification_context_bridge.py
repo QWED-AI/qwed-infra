@@ -85,6 +85,7 @@ def _cast_status_preserving(result):
     object.__setattr__(rebuilt, 'agent_message', getattr(result, 'agent_message', ''))
     object.__setattr__(rebuilt, 'developer_fields', valid_dev)
     object.__setattr__(rebuilt, 'proof_ref', getattr(result, 'proof_ref', None))
+    object.__setattr__(rebuilt, 'proof_data', getattr(result, 'proof_data', None))
     return rebuilt
 
 

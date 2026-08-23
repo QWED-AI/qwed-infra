@@ -85,6 +85,42 @@ def compute_proof_ref(evidence: Dict[str, Any]) -> str:
     return f"sha256:{digest}"
 
 
+def _parse_status(raw_status: Any) -> InfraDiagnosticStatus:
+    """Parse and validate a serialized diagnostic status (fail-closed)."""
+    if raw_status is None:
+        raise ValueError("from_dict: 'status' is required — no default.")
+    if isinstance(raw_status, InfraDiagnosticStatus):
+        return raw_status
+    if isinstance(raw_status, str):
+        try:
+            return InfraDiagnosticStatus(raw_status)
+        except ValueError:
+            pass
+    valid = ", ".join(s.value for s in InfraDiagnosticStatus)
+    raise ValueError(
+        f"from_dict: invalid status {raw_status!r} — must be one of: {valid}."
+    )
+
+
+def _validated_proof_pair(proof_ref: Any, proof_data: Any) -> Optional[str]:
+    """Validate a serialized (proof_ref, proof_data) pair; return proof_data.
+
+    Fail-closed integrity check: whenever both are present, proof_data must
+    commit to proof_ref — including the empty-string case, which would
+    otherwise skip validation and allow a tampered pair through.
+    """
+    if proof_data is not None and not isinstance(proof_data, str):
+        raise ValueError("from_dict: 'proof_data' must be a string or None.")
+    if proof_ref is not None and proof_data is not None:
+        expected = f"sha256:{hashlib.sha256(proof_data.encode('utf-8')).hexdigest()}"
+        if expected != proof_ref:
+            raise ValueError(
+                "from_dict: 'proof_data' does not commit to 'proof_ref' — "
+                "serialized diagnostic is inconsistent."
+            )
+    return proof_data
+
+
 @dataclass(frozen=True)
 class InfraDiagnosticResult:
     """Unified 3-layer infra verification diagnostic result.
@@ -192,27 +228,7 @@ class InfraDiagnosticResult:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InfraDiagnosticResult":
-        raw_status = data.get("status")
-        if raw_status is None:
-            raise ValueError("from_dict: 'status' is required — no default.")
-        if isinstance(raw_status, str):
-            try:
-                status = InfraDiagnosticStatus(raw_status)
-            except ValueError:
-                valid = ", ".join(s.value for s in InfraDiagnosticStatus)
-                raise ValueError(
-                    f"from_dict: invalid status {raw_status!r} — "
-                    f"must be one of: {valid}."
-                ) from None
-        elif isinstance(raw_status, InfraDiagnosticStatus):
-            status = raw_status
-        else:
-            valid = ", ".join(s.value for s in InfraDiagnosticStatus)
-            raise ValueError(
-                f"from_dict: invalid status type {type(raw_status).__name__} — "
-                f"must be one of: {valid}."
-            )
-
+        status = _parse_status(data.get("status"))
         agent_message = data.get("agent_message")
         if not isinstance(agent_message, str) or not agent_message.strip():
             raise ValueError(
@@ -224,20 +240,8 @@ class InfraDiagnosticResult:
         if not isinstance(developer_fields, dict):
             raise ValueError("from_dict: 'developer_fields' must be a dict.")
 
-        proof_data = data.get("proof_data")
-        if proof_data is not None and not isinstance(proof_data, str):
-            raise ValueError("from_dict: 'proof_data' must be a string or None.")
         proof_ref = data.get("proof_ref")
-
-        # Fail-closed integrity check: a serialized proof_data must commit to
-        # the accompanying proof_ref, otherwise the pair is tampered.
-        if proof_ref is not None and proof_data is not None:
-            expected = f"sha256:{hashlib.sha256(proof_data.encode('utf-8')).hexdigest()}"
-            if proof_data and expected != proof_ref:
-                raise ValueError(
-                    "from_dict: 'proof_data' does not commit to 'proof_ref' — "
-                    "serialized diagnostic is inconsistent."
-                )
+        proof_data = _validated_proof_pair(proof_ref, data.get("proof_data"))
 
         return cls(
             status=status,
