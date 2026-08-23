@@ -41,12 +41,14 @@ class TestProofDataCommitmentEnforced:
     def test_direct_construction_empty_proof_data_rejected(self):
         from qwed_infra.diagnostics import InfraDiagnosticStatus
 
+        # proof_ref = sha256("") so the pair-integrity check PASSES and the
+        # test reaches the dedicated non-empty proof_data rejection instead.
         with pytest.raises(ValueError):
             InfraDiagnosticResult(
                 status=InfraDiagnosticStatus.VERIFIED,
                 agent_message="v",
                 developer_fields={"audit_trace": {"rule_id": "R"}},
-                proof_ref="sha256:" + "0" * 64,
+                proof_ref="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 proof_data="",
             )
 
@@ -160,6 +162,40 @@ class TestEnforceTrustDecisionFailClosed:
         )
         assert enforced.status.value == "BLOCKED"
         assert enforced.developer_fields["constraint_id"] == "trust_gate.claims_status_mismatch"
+
+    def test_missing_proof_hash_blocked_distinctly(self):
+        """A token without a qwed.proof_hash claim gets its own fail-closed
+        reason (claims_proof_missing), not a generic mismatch."""
+        from qwed_infra.attestation import (
+            VerificationResult as AVR,
+            get_attestation_service,
+        )
+
+        result = _verified_diagnostic()
+        service = get_attestation_service()
+        att = service.create_attestation(
+            AVR(status="VERIFIED", verified=False, engine="x"),  # not verified -> no proof_hash claim
+            original_query=STATEMENT,
+        )
+        enforced = enforce_trust_decision(
+            result, attestation_token=att.jwt_token, query=STATEMENT
+        )
+        assert enforced.status.value == "BLOCKED"
+        assert enforced.developer_fields["constraint_id"] == "trust_gate.claims_proof_missing"
+
+    def test_create_attestation_rejects_verified_without_proof_data(self):
+        """Issuance-side guard: VERIFIED tokens without proof_data cannot exist."""
+        from qwed_infra.attestation import (
+            VerificationResult as AVR,
+            get_attestation_service,
+        )
+
+        service = get_attestation_service()
+        with pytest.raises(ValueError):
+            service.create_attestation(
+                AVR(status="VERIFIED", verified=True, engine="x"),
+                original_query=STATEMENT,
+            )
 
 
 class TestAttestationServiceContract:

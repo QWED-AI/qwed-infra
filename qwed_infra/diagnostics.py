@@ -429,6 +429,15 @@ def _validate_attestation_claims(
             )
 
     token_proof_hash = qwed_claims.get("proof_hash")
+    if token_proof_hash is None:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation carries no proof hash",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_proof_missing",
+                "result_proof_ref": result.proof_ref,
+                "policy": policy,
+            },
+        )
     if token_proof_hash != result.proof_ref:
         return InfraDiagnosticResult.blocked(
             agent_message="Verification blocked — attestation proof hash does not match result",
