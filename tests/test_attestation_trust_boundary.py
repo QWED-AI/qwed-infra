@@ -27,39 +27,45 @@ class TestProofDataCommitmentEnforced:
     """#47: proof_data must commit to proof_ref on EVERY construction path."""
 
     def test_direct_construction_mismatched_proof_data_rejected(self):
-        from qwed_infra.diagnostics import InfraDiagnosticStatus
+        from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 
+        status = InfraDiagnosticStatus.VERIFIED
+        fields = {"audit_trace": {"rule_id": "R"}}
         with pytest.raises(ValueError):
             InfraDiagnosticResult(
-                status=InfraDiagnosticStatus.VERIFIED,
+                status=status,
                 agent_message="v",
-                developer_fields={"audit_trace": {"rule_id": "R"}},
+                developer_fields=fields,
                 proof_ref="sha256:" + "0" * 64,
                 proof_data='{"altered": true}',
             )
 
     def test_direct_construction_empty_proof_data_rejected(self):
-        from qwed_infra.diagnostics import InfraDiagnosticStatus
+        from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 
         # proof_ref = sha256("") so the pair-integrity check PASSES and the
         # test reaches the dedicated non-empty proof_data rejection instead.
+        status = InfraDiagnosticStatus.VERIFIED
+        empty_digest = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         with pytest.raises(ValueError):
             InfraDiagnosticResult(
-                status=InfraDiagnosticStatus.VERIFIED,
+                status=status,
                 agent_message="v",
                 developer_fields={"audit_trace": {"rule_id": "R"}},
-                proof_ref="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                proof_ref=empty_digest,
                 proof_data="",
             )
 
     def test_direct_construction_missing_proof_data_rejected(self):
-        from qwed_infra.diagnostics import InfraDiagnosticStatus
+        from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 
+        status = InfraDiagnosticStatus.VERIFIED
+        fields = {"audit_trace": {"rule_id": "R"}}
         with pytest.raises(ValueError):
             InfraDiagnosticResult(
-                status=InfraDiagnosticStatus.VERIFIED,
+                status=status,
                 agent_message="v",
-                developer_fields={"audit_trace": {"rule_id": "R"}},
+                developer_fields=fields,
                 proof_ref="sha256:" + "0" * 64,
             )
 
@@ -164,21 +170,44 @@ class TestEnforceTrustDecisionFailClosed:
         assert enforced.developer_fields["constraint_id"] == "trust_gate.claims_status_mismatch"
 
     def test_missing_proof_hash_blocked_distinctly(self):
-        """A token without a qwed.proof_hash claim gets its own fail-closed
-        reason (claims_proof_missing), not a generic mismatch."""
-        from qwed_infra.attestation import (
-            VerificationResult as AVR,
-            get_attestation_service,
-        )
+        """A VERIFIED token without a qwed.proof_hash claim gets its own
+        fail-closed reason (claims_proof_missing), not a generic mismatch.
+
+        Issuance now rejects VERIFIED-without-proof_data, so the token is
+        crafted and signed directly with the service key (legacy-token shape).
+        """
+        import time
+
+        import jwt as pyjwt
+
+        from qwed_infra.attestation import get_attestation_service
+        from qwed_infra.diagnostics import _compute_query_hash
 
         result = _verified_diagnostic()
         service = get_attestation_service()
-        att = service.create_attestation(
-            AVR(status="VERIFIED", verified=False, engine="x"),  # not verified -> no proof_hash claim
-            original_query=STATEMENT,
+        key_pair = service._ensure_key_pair()
+        now = int(time.time())
+        payload = {
+            "iss": service.issuer_did,
+            "sub": _compute_query_hash(STATEMENT),
+            "iat": now,
+            "exp": now + 3600,
+            "jti": "crafted-no-proof-hash",
+            "qwed": {
+                "version": "1.0",
+                "result": {"status": "VERIFIED", "verified": True, "engine": "x", "confidence": 1.0},
+                "query_hash": _compute_query_hash(STATEMENT),
+                # deliberately NO proof_hash claim
+            },
+        }
+        token = pyjwt.encode(
+            payload,
+            key_pair.private_key_pem,
+            algorithm="ES256",
+            headers={"alg": "ES256", "typ": "qwed-attestation+jwt", "kid": key_pair.key_id},
         )
         enforced = enforce_trust_decision(
-            result, attestation_token=att.jwt_token, query=STATEMENT
+            result, attestation_token=token, query=STATEMENT
         )
         assert enforced.status.value == "BLOCKED"
         assert enforced.developer_fields["constraint_id"] == "trust_gate.claims_proof_missing"
@@ -196,6 +225,58 @@ class TestEnforceTrustDecisionFailClosed:
                 AVR(status="VERIFIED", verified=True, engine="x"),
                 original_query=STATEMENT,
             )
+
+    def test_create_attestation_rejects_verified_status_with_false_flag(self):
+        """Issuance-side guard: status='VERIFIED' requires verified=True —
+        the service must not sign internally inconsistent claims."""
+        import time
+
+        import jwt as pyjwt
+
+        from qwed_infra.attestation import (
+            VerificationResult as AVR,
+            get_attestation_service,
+        )
+        from qwed_infra.diagnostics import _compute_query_hash
+
+        service = get_attestation_service()
+        key_pair = service._ensure_key_pair()
+
+        # 1. Issuance rejects the conflicting request outright.
+        with pytest.raises(ValueError):
+            service.create_attestation(
+                AVR(status="VERIFIED", verified=False, engine="x"),
+                original_query=STATEMENT,
+                proof_data="proof",
+            )
+
+        # 2. Gate-level defense: a hand-signed legacy token carrying the same
+        # conflicting claims (with a MATCHING proof_hash) is still rejected.
+        now = int(time.time())
+        payload = {
+            "iss": service.issuer_did,
+            "sub": _compute_query_hash(STATEMENT),
+            "iat": now,
+            "exp": now + 3600,
+            "jti": "crafted-verified-false",
+            "qwed": {
+                "version": "1.0",
+                "result": {"status": "VERIFIED", "verified": False, "engine": "x", "confidence": 1.0},
+                "query_hash": _compute_query_hash(STATEMENT),
+                "proof_hash": "sha256:" + "a" * 64,
+            },
+        }
+        token = pyjwt.encode(
+            payload,
+            key_pair.private_key_pem,
+            algorithm="ES256",
+            headers={"alg": "ES256", "typ": "qwed-attestation+jwt", "kid": key_pair.key_id},
+        )
+        enforced = enforce_trust_decision(
+            _verified_diagnostic(), attestation_token=token, query=STATEMENT
+        )
+        assert enforced.status.value == "BLOCKED"
+        assert enforced.developer_fields["constraint_id"] == "trust_gate.claims_verified_mismatch"
 
 
 class TestAttestationServiceContract:
