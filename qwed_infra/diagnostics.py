@@ -186,6 +186,7 @@ class InfraDiagnosticResult:
             "agent_message": self.agent_message,
             "developer_fields": fields,
             "proof_ref": self.proof_ref,
+            "proof_data": self.proof_data,
             "is_authoritative": self.is_authoritative,
         }
 
@@ -223,11 +224,27 @@ class InfraDiagnosticResult:
         if not isinstance(developer_fields, dict):
             raise ValueError("from_dict: 'developer_fields' must be a dict.")
 
+        proof_data = data.get("proof_data")
+        if proof_data is not None and not isinstance(proof_data, str):
+            raise ValueError("from_dict: 'proof_data' must be a string or None.")
+        proof_ref = data.get("proof_ref")
+
+        # Fail-closed integrity check: a serialized proof_data must commit to
+        # the accompanying proof_ref, otherwise the pair is tampered.
+        if proof_ref is not None and proof_data is not None:
+            expected = f"sha256:{hashlib.sha256(proof_data.encode('utf-8')).hexdigest()}"
+            if proof_data and expected != proof_ref:
+                raise ValueError(
+                    "from_dict: 'proof_data' does not commit to 'proof_ref' — "
+                    "serialized diagnostic is inconsistent."
+                )
+
         return cls(
             status=status,
             agent_message=agent_message,
             developer_fields=developer_fields,
-            proof_ref=data.get("proof_ref"),
+            proof_ref=proof_ref,
+            proof_data=proof_data,
         )
 
     @classmethod
@@ -314,11 +331,13 @@ def _verify_attestation_token(
             trusted_issuers=trusted_issuers,
         )
     except Exception as exc:
+        # Record the exception type only — never args/message — so no internal
+        # detail (paths, keys, stack context) leaks into developer_fields.
         return InfraDiagnosticResult.blocked(
             agent_message="Verification blocked — proof artifact verification failed",
             developer_fields={
                 "constraint_id": "trust_gate.attestation_verification_error",
-                "error": str(exc),
+                "error_type": type(exc).__name__,
                 "policy": policy,
                 "verdict_status": result.status.value,
                 "verdict_proof_ref": result.proof_ref,

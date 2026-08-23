@@ -208,6 +208,34 @@ class TestGuardEndToEndAttestation:
         assert vc_forged.verdict == Verdict.BLOCKED
         assert vc_forged.context.decision.admission == Admission.DENY
 
+    def test_guard_statement_overclaim_blocked_end_to_end(self):
+        """Mint for a narrow statement, submit a broader one -> BLOCKED/DENY.
+
+        Proves query_hash binding is enforced through the guard->bridge path
+        (not just direct enforce_trust_decision calls).
+        """
+        guard = NetworkGuard()
+        resources = self._resources()
+        narrow = "Reachability verified: internet -> subnet-a port 80 only"
+        broad = "ALL traffic to every subnet and every port is safe"
+        diag = self._reachable_diag(guard, resources)
+        att = mint_diagnostic_attestation(diag, engine="NetworkGuard", query=narrow)
+        vc = guard.to_verification_context(
+            resources, "internet", "subnet-a", 80,
+            formal_statement=broad, attestation_token=att.token,
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+        assert vc.context.evidence.proof_ref is None
+        # BLOCKED (not VERIFIED) is itself the proof that query binding fired:
+        # status and proof_hash both match this diagnostic, so only the
+        # statement mismatch can have failed enforcement.
+        #
+        # Note: the document evidence payload intentionally preserves the
+        # original guard diagnostic (its constraint_id), not the trust-gate
+        # block reason - evidence records what was computed; the decision
+        # layer records the enforcement outcome.
+
     def test_distinct_attestations_distinct_document_proof_refs(self):
         from qwed_infra.attestation import (
             VerificationResult as AVR,

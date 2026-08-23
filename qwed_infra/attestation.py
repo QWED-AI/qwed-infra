@@ -387,20 +387,15 @@ class AttestationService:
             trusted_issuers = [self.issuer_did]
 
         try:
-            # Boundary checks before any cryptographic work. Attacker-controlled
-            # payload is validated structurally; no claim is trusted until the
-            # signature is verified below with the local key.
-            try:
-                if len(jwt_token) > 8192:
-                    return False, None, _GENERIC_REJECTION_MSG
-                _, payload_segment, _ = jwt_token.split('.', 2)
-                if len(payload_segment) > 4096:
-                    return False, None, _GENERIC_REJECTION_MSG
-                payload_data = base64.urlsafe_b64decode(payload_segment + '=' * (-len(payload_segment) % 4))
-                unverified = json.loads(payload_data)
-                if not isinstance(unverified, dict):
-                    return False, None, _GENERIC_REJECTION_MSG
-            except (IndexError, ValueError, TypeError, RecursionError):
+            # Boundary checks before any cryptographic work (fail fast on
+            # oversized or malformed input). No claim is trusted until the
+            # signature is verified below with the local key — jwt.decode
+            # performs payload parsing itself, so this layer never decodes
+            # attacker-controlled bytes.
+            if not isinstance(jwt_token, str):
+                return False, None, _GENERIC_REJECTION_MSG
+            segments = jwt_token.split(".")
+            if len(jwt_token) > 8192 or len(segments) != 3 or len(segments[1]) > 4096:
                 return False, None, _GENERIC_REJECTION_MSG
 
             # Always select the local key; issuer authorization is applied only
@@ -415,6 +410,8 @@ class AttestationService:
                 algorithms=["ES256"],
                 options={"verify_signature": True, "verify_exp": True, "require": ["iss", "sub", "iat", "exp", "jti"]},
             )
+            if not isinstance(claims, dict):
+                return False, None, _GENERIC_REJECTION_MSG
 
             # Now verified: apply issuer authorization. External issuers have no
             # key resolution implemented (#275) — silent generic, never enumerate.
@@ -439,6 +436,14 @@ class AttestationService:
             return False, None, _GENERIC_REJECTION_MSG
         except jwt.InvalidTokenError as e:
             logger.debug(f"Attestation verification failed (silent): {type(e).__name__}")
+            return False, None, _GENERIC_REJECTION_MSG
+        except RecursionError:
+            # Deeply nested payload segments can raise during JWT-internal JSON
+            # parsing — reject generically instead of escaping the boundary.
+            logger.debug("Attestation payload too deeply nested (silent)")
+            return False, None, _GENERIC_REJECTION_MSG
+        except (TypeError, ValueError):
+            # Non-string tokens and malformed structures fail closed.
             return False, None, _GENERIC_REJECTION_MSG
 
     def revoke_attestation(self, attestation_id: str) -> bool:
@@ -466,17 +471,22 @@ class AttestationService:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# Module-level singleton (double-checked locking: concurrent first callers
+# must not install different services — each service has its own ephemeral
+# key, and a lost race would make valid tokens fail verification).
 # ---------------------------------------------------------------------------
 
 _default_service: Optional[AttestationService] = None
+_singleton_lock: threading.Lock = threading.Lock()
 
 
 def get_attestation_service() -> AttestationService:
-    """Get the default attestation service."""
+    """Get the default attestation service (thread-safe lazy init)."""
     global _default_service
     if _default_service is None:
-        _default_service = AttestationService()
+        with _singleton_lock:
+            if _default_service is None:
+                _default_service = AttestationService()
     return _default_service
 
 

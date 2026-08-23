@@ -113,7 +113,7 @@ def _normalize_developer_fields(result):
     return result
 
 
-def _apply_attestation_policy(result, attestation_token):
+def _apply_attestation_policy(result, attestation_token, formal_statement):
     """Apply the #47 attestation trust boundary to a VERIFIED decision result.
 
     - VERIFIED + no token        → UNVERIFIABLE (fail-closed demotion, unchanged)
@@ -121,6 +121,8 @@ def _apply_attestation_policy(result, attestation_token):
       enforce_trust_decision: signature/issuer/expiry/revocation plus claim
       binding (status match, query_hash == sha256(formal_statement),
       proof_hash == diagnostic proof_ref). Any failure → BLOCKED.
+      Binding the formal_statement here means a token minted for one claim
+      can never admit a different (e.g. broader) statement.
     - Non-VERIFIED statuses pass through unchanged (attestation irrelevant).
     """
     if result.status is not InfraDiagnosticStatus.VERIFIED:
@@ -136,6 +138,7 @@ def _apply_attestation_policy(result, attestation_token):
         result,
         attestation_token=attestation_token,
         require_attestation=True,
+        query=formal_statement,
     )
 
 
@@ -226,7 +229,7 @@ def verification_context_from_diagnostic_result(
     # UNVERIFIABLE demotion. On success, the attested identity (issuer/jti/
     # query_hash) is bound into Proof.configuration so distinct accepted
     # attestations yield distinct document proof_refs.
-    enforced = _apply_attestation_policy(decision_result, attestation_token)
+    enforced = _apply_attestation_policy(decision_result, attestation_token, formal_statement)
     attested_claims = None
     if (
         enforced.status is InfraDiagnosticStatus.VERIFIED

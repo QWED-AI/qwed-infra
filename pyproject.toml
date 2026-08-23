@@ -14,7 +14,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "python-hcl2>=4.3.0",  # For parsing Terraform
     "tomli>=2.0.0; python_version < '3.11'",  # For pyproject.toml parsing
-    "pyjwt>=2.8.0,!=2.12.1",      # Attestation signing/verification (ES256)
+    "pyjwt>=2.8.0,!=2.12.1",      # Attestation signing/verification (ES256); !=2.12.1 excluded for GHSA-jq35-7prp-9v3f (PyJWK path — attestations use PEM keys, excluded defensively)
     "cryptography>=41.0.0",       # ECDSA P-256 keys for attestations
 ]
 
