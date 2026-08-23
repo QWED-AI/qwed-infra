@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Verification Context v1.0 across all four guards (tracker #36) — every guard now exposes `to_verification_context()`, producing a schema-valid, tamper-evident VC document (claim, verifier identity, `sha256`-bound evidence `proof_ref`, ADMIT/DENY admission):
+  - IamGuard (#38, PR #45), NetworkGuard (#39, PR #46), CostGuard (#40, PR #48), ArtifactBoundaryGuard (#41, PR #50)
+  - Shared bridge module `verification_context_bridge` (#37, PR #44): diagnostic → VC document conversion with fail-closed attestation policy and decision-status demotion
+  - Conformance suite `tests/test_vc_conformance.py` (#42, PR #52) — bridge + all guards + document validation + malformed-input fail-closed acceptance tests
+  - README: "Verification Context v1.0" section — why VC, usage examples, downstream integration guide; VC badge in the header
+
+### Changed
+- **BREAKING (pre-1.0, unreleased API):** guard adapters no longer accept pre-computed result objects. `to_verification_context()` takes **raw verification inputs** and runs the guard's own deterministic solver internally (`NetworkGuard.to_verification_context(resources, source, destination, port, ...)` / `IamGuard.to_verification_context(policy, action, resource, context, ...)` / `CostGuard.to_verification_context(resources, budget_monthly, ...)` / `ArtifactBoundaryGuard.to_verification_context(package_dir, ...)`) — a result-accepting signature is forgeable (a caller could fabricate a positive result and mint ADMIT), so it was removed before any release (PRs #45/#46/#48/#50)
+
+### Fixed
+- Fail-closed on malformed inputs at every VC boundary: undecimal budgets, extreme Decimal values, non-string build backends, malformed topology/policy/package inputs, symlink escapes/loops, wheel entries outside the scanned boundary — all map to BLOCKED/DENY documents instead of exceptions or guessed approval (#48, #49/PR #51, #50)
+- ArtifactBoundaryGuard proof binding: content manifests (per-file sha256), package identity derived from the inspected directory, exact-match backend allowlist (#47 follow-ups in PR #50)
+- IAM verified-denial results demote to BLOCKED (never ADMIT); the diagnostic's own proof hash is preserved inside the evidence payload (`diagnostic_proof_ref`), while the document-level `evidence.proof_ref` stays null for every DENY decision (fail-closed contract)
+
 ## [0.2.0] - 2026-07-02
 
 ### Added

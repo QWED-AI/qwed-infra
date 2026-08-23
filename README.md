@@ -7,6 +7,7 @@
 > "Don't let AI hallucinate your cloud bill to $20,000."
 
 [![Verified by QWED](https://img.shields.io/badge/Verified_by-QWED-00C853?style=flat&logo=checkmarx)](https://github.com/QWED-AI/qwed-infra)
+[![Verification Context](https://img.shields.io/badge/VC-v1.0-6C3FC5?style=flat&logo=docusign)](https://github.com/QWED-AI/qwed-infra#verification-context-v10)
 [![PyPI](https://img.shields.io/pypi/v/qwed-infra?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/qwed-infra/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
@@ -185,6 +186,97 @@ if diagnostic.status.value == "BLOCKED":
 else:
     print("✅ Package boundary verified — safe to ship.")
 ```
+
+---
+
+## 🔏 Verification Context v1.0
+
+Every guard can emit a **Verification Context (VC) document** — a portable, machine-checkable trust artifact that records *what was verified, by whom, with what proof*, and *whether a downstream system should admit or deny*.
+
+### Why VC?
+
+A `True/False` return value is enough for one process — but CI/CD pipelines, release gates, and audit trails need **evidence that travels**:
+
+| Plain result | Verification Context |
+| :--- | :--- |
+| `result.allowed == False` | Document: claim, verifier identity+version, hash-linked evidence (`proof_ref`), admission decision |
+| Lives only in your process log | JSON-serializable, schema-validated, evidence-bound (`sha256` proof_ref computed over the exact evidence) |
+| No story when someone asks "who verified this?" | `proof.verifier`, `audit_trace`, and rule IDs answer it |
+
+The document is **fail-closed by construction**: anything that is not proven is `DENY` — `UNVERIFIABLE` and `BLOCKED` outcomes can never produce `ADMIT`. Note that in v1.0 the attestation token is checked for **presence only** — cryptographic validation (signature/issuer/expiry/claim binding) lands with #47.
+
+### Usage
+
+Each guard runs its own verification internally and returns a VC document. You pass raw inputs — never a pre-computed result object:
+
+```python
+from qwed_infra import NetworkGuard
+
+net = NetworkGuard()
+infra = {
+    "subnets": [{"id": "subnet-web", "security_groups": ["sg-web"]}],
+    "route_tables": [
+        {"subnet_id": "subnet-web", "routes": {"0.0.0.0/0": "igw-main"}},
+    ],
+    "security_groups": {
+        "sg-web": {"ingress": [{"port": 80, "cidr": "0.0.0.0/0"}]},
+    },
+}
+
+doc = net.to_verification_context(
+    infra,                       # raw topology — the guard verifies this itself
+    "internet",
+    "subnet-web",
+    80,
+    formal_statement="Traffic from internet to subnet-web on port 80 is safe",
+    # optional; v1.0 checks PRESENCE only (any non-empty string). Without it,
+    # VERIFIED degrades to UNVERIFIABLE. Cryptographic validation: #47.
+    attestation_token="my-release-attestation-v1",
+)
+
+print(doc.verdict.value)          # -> VERIFIED / BLOCKED / UNVERIFIABLE
+print(doc.context.decision.admission.value)  # -> ADMIT / DENY
+```
+
+The same pattern holds for every guard (`formal_statement` is keyword-only and required).
+Schematic — define `policy`/`resources` etc. as in the guard examples above:
+
+```python
+IamGuard().to_verification_context(policy, action, resource, context,
+                                   formal_statement="IAM policy is safe to apply")
+CostGuard().to_verification_context(resources, budget_monthly,
+                                    formal_statement="Estimated cost is within budget")
+ArtifactBoundaryGuard().to_verification_context(package_dir="mypkg", pyproject_path="pyproject.toml",
+                                                formal_statement="Package boundary is safe to publish")
+```
+
+### Using VC documents downstream
+
+```python
+from qwed_infra.verification_context import is_valid_document, resolve_document_proof_ref
+
+document = doc.to_dict()   # JSON-serializable dict
+
+if not is_valid_document(document):
+    raise ValueError("Invalid VC document — reject")   # schema/verdict inconsistency
+
+admission = document["context"]["decision"]["admission"]   # ADMIT or DENY
+
+if admission == "ADMIT":
+    # VERIFIED documents carry a proof_ref bound to the exact evidence;
+    # require that it resolves before trusting the decision.
+    if not resolve_document_proof_ref(document):
+        raise ValueError("VC document proof_ref does not resolve — reject")
+    # ... proceed with the gated operation ...
+else:
+    # DENY: fail closed. BLOCKED/UNVERIFIABLE documents do not require
+    # context.evidence.proof_ref (diagnostic proof hashes are separate).
+    raise PermissionError(f"Verification denied ({document['verdict']}) — reject")
+```
+
+Store or forward `document` anywhere JSON goes — release gates, pipeline artifacts, audit logs. The `proof_ref` binds a VERIFIED decision to the exact evidence that produced it. VC evidence can contain sensitive infrastructure, policy, or cost data — apply your own access control, redaction, and retention rules when storing or forwarding documents downstream.
+
+> **Roadmap (#47):** today the attestation token is checked for **presence only**; cryptographic validation and claim binding (signature, issuer, expiry, digest binding à la `enforce_trust_decision`) land with the attestation trust boundary milestone.
 
 ---
 
