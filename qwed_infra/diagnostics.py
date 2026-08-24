@@ -121,6 +121,50 @@ def _validated_proof_pair(proof_ref: Any, proof_data: Any) -> Optional[str]:
     return proof_data
 
 
+def _validate_verified_invariants(result) -> None:
+    """VERIFIED-only invariants: proof artifact, audit trace, evidence commitment."""
+    if not result.proof_ref:
+        raise ValueError(
+            "VERIFIED status requires proof_ref is not None and non-empty — "
+            "a claim cannot be marked proven without a proof artifact hash. "
+            "Use UNVERIFIABLE if no proof was established."
+        )
+    if "audit_trace" not in result.developer_fields:
+        raise ValueError(
+            "VERIFIED status requires 'audit_trace' in developer_fields — "
+            "a proved claim must reference its audit trace."
+        )
+    # #47 proof commitment: proof_data must be present and hash to
+    # proof_ref on EVERY construction path (factory, from_dict, direct),
+    # so serialized evidence can never diverge from the attested
+    # commitment. The dataclass is frozen, which prevents later mutation.
+    _validated_proof_pair(result.proof_ref, result.proof_data)
+    if not isinstance(result.proof_data, str) or not result.proof_data:
+        raise ValueError(
+            "VERIFIED status requires non-empty proof_data — the canonical "
+            "evidence string that commits to proof_ref. Attestations bind "
+            "qwed.proof_hash to it (#47)."
+        )
+
+
+def _validate_non_verified_invariants(result) -> None:
+    """Non-VERIFIED invariants: no proof artifacts may survive a demotion."""
+    if result.proof_ref is not None:
+        raise ValueError(
+            f"{result.status.value} status requires proof_ref is None — "
+            "non-VERIFIED states are non-authoritative by construction."
+        )
+
+    # proof_data is the VERIFIED evidence commitment aid; carrying it on a
+    # non-VERIFIED result would be an inconsistent state (e.g. a stale
+    # value surviving a status demotion via dataclasses.replace).
+    if result.proof_data is not None:
+        raise ValueError(
+            f"{result.status.value} status requires proof_data is None — "
+            "the canonical evidence string exists only for VERIFIED results."
+        )
+
+
 @dataclass(frozen=True)
 class InfraDiagnosticResult:
     """Unified 3-layer infra verification diagnostic result.
@@ -155,43 +199,9 @@ class InfraDiagnosticResult:
             raise ValueError("developer_fields must be a dict")
 
         if self.status is InfraDiagnosticStatus.VERIFIED:
-            if not self.proof_ref:
-                raise ValueError(
-                    "VERIFIED status requires proof_ref is not None and non-empty — "
-                    "a claim cannot be marked proven without a proof artifact hash. "
-                    "Use UNVERIFIABLE if no proof was established."
-                )
-            if "audit_trace" not in self.developer_fields:
-                raise ValueError(
-                    "VERIFIED status requires 'audit_trace' in developer_fields — "
-                    "a proved claim must reference its audit trace."
-                )
-            # #47 proof commitment: proof_data must be present and hash to
-            # proof_ref on EVERY construction path (factory, from_dict, direct),
-            # so serialized evidence can never diverge from the attested
-            # commitment. The dataclass is frozen, which prevents later mutation.
-            _validated_proof_pair(self.proof_ref, self.proof_data)
-            if not isinstance(self.proof_data, str) or not self.proof_data:
-                raise ValueError(
-                    "VERIFIED status requires non-empty proof_data — the canonical "
-                    "evidence string that commits to proof_ref. Attestations bind "
-                    "qwed.proof_hash to it (#47)."
-                )
-
-        if self.status is not InfraDiagnosticStatus.VERIFIED and self.proof_ref is not None:
-            raise ValueError(
-                f"{self.status.value} status requires proof_ref is None — "
-                "non-VERIFIED states are non-authoritative by construction."
-            )
-
-        # proof_data is the VERIFIED evidence commitment aid; carrying it on a
-        # non-VERIFIED result would be an inconsistent state (e.g. a stale
-        # value surviving a status demotion via dataclasses.replace).
-        if self.status is not InfraDiagnosticStatus.VERIFIED and self.proof_data is not None:
-            raise ValueError(
-                f"{self.status.value} status requires proof_data is None — "
-                "the canonical evidence string exists only for VERIFIED results."
-            )
+            _validate_verified_invariants(self)
+        else:
+            _validate_non_verified_invariants(self)
 
     @property
     def is_verified(self) -> bool:
