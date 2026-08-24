@@ -184,6 +184,15 @@ class InfraDiagnosticResult:
                 "non-VERIFIED states are non-authoritative by construction."
             )
 
+        # proof_data is the VERIFIED evidence commitment aid; carrying it on a
+        # non-VERIFIED result would be an inconsistent state (e.g. a stale
+        # value surviving a status demotion via dataclasses.replace).
+        if self.status is not InfraDiagnosticStatus.VERIFIED and self.proof_data is not None:
+            raise ValueError(
+                f"{self.status.value} status requires proof_data is None — "
+                "the canonical evidence string exists only for VERIFIED results."
+            )
+
     @property
     def is_verified(self) -> bool:
         return self.status is InfraDiagnosticStatus.VERIFIED
@@ -253,6 +262,17 @@ class InfraDiagnosticResult:
 
         proof_ref = data.get("proof_ref")
         proof_data = _validated_proof_pair(proof_ref, data.get("proof_data"))
+
+        if status is InfraDiagnosticStatus.VERIFIED and not proof_data:
+            # Deliberately fail-closed: this payload predates the #47
+            # evidence-commitment contract. Without its canonical evidence it
+            # can never be attested, so it cannot load as VERIFIED under
+            # VC v1.0 attestation rules - re-run the verification to regenerate.
+            raise ValueError(
+                "from_dict: VERIFIED diagnostic has no 'proof_data' — "
+                "pre-attestation payloads cannot be loaded under VC v1.0 "
+                "attestation rules (#47). Re-run the verification to regenerate."
+            )
 
         return cls(
             status=status,

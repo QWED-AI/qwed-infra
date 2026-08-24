@@ -223,10 +223,12 @@ def verification_context_from_diagnostic_result(
     if decision_status is not None:
         # Fail-closed decision override: evidence keeps the authoritative
         # diagnostic (status + proof_ref), decision derives from decision_status.
+        # proof_data is cleared with status: it exists only on VERIFIED results.
         decision_result = replace(
             decision_result,
             status=decision_status,
             proof_ref=None,
+            proof_data=None,
         )
 
     # #47 attestation trust boundary. For VERIFIED decisions with a supplied

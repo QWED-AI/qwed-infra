@@ -76,6 +76,44 @@ class TestProofDataCommitmentEnforced:
         restored = InfraDiagnosticResult.from_dict(result.to_dict())
         assert restored.proof_data == result.proof_data
 
+    def test_legacy_verified_payload_rejected(self):
+        """Pre-#47 payloads (VERIFIED without proof_data) fail closed at load
+        with a targeted message - they can never be attested."""
+        legacy = _verified_diagnostic().to_dict()
+        legacy.pop("proof_data")
+        with pytest.raises(ValueError, match="pre-attestation payloads"):
+            InfraDiagnosticResult.from_dict(legacy)
+
+    def test_non_verified_with_proof_data_rejected(self):
+        from qwed_infra.diagnostics import InfraDiagnosticStatus
+
+        with pytest.raises(ValueError):
+            InfraDiagnosticResult(
+                status=InfraDiagnosticStatus.BLOCKED,
+                agent_message="b",
+                developer_fields={},
+                proof_ref=None,
+                proof_data='{"stale": true}',
+            )
+
+    def test_bridge_demotion_clears_proof_data(self):
+        """The decision_status override demotes VERIFIED -> BLOCKED; the
+        demoted object must clear proof_data (non-VERIFIED invariant)."""
+        from qwed_infra.diagnostics import InfraDiagnosticStatus
+        from qwed_infra.verification_context_bridge import verification_context_from_diagnostic_result
+
+        diag = _verified_diagnostic()
+        att = mint_diagnostic_attestation(diag, engine="E", query=STATEMENT)
+        vc = verification_context_from_diagnostic_result(
+            diag,
+            formal_statement=STATEMENT,
+            verifier="E",
+            attestation_token=att.token,
+            decision_status=InfraDiagnosticStatus.BLOCKED,
+        )
+        assert vc.verdict == Verdict.BLOCKED
+        assert vc.context.decision.admission == Admission.DENY
+
 
 def _verified_diagnostic():
     return InfraDiagnosticResult.verified(
