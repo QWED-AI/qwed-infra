@@ -1,0 +1,621 @@
+"""
+QWED-Infra Attestation Service
+
+Implements the QWED-Attestation specification for cryptographic verification proofs.
+Uses JWT with ES256 (ECDSA P-256) for signing attestations.
+
+Mirrors qwed-verification's core/attestation.py (#47): engine-side issuance of
+cryptographic receipts for VERIFIED verification results.
+
+Security contract (mirrors qwed-verification Issue #188):
+- create_verification_attestation() NEVER returns None; it returns an AttestationResult
+  whose .status is one of "ISSUED" | "BLOCKED" | "UNVERIFIABLE".
+- Callers MUST check result.is_issued before treating the attestation as valid.
+- Key lifecycle events are auditable via structured log entries.
+"""
+
+import hashlib
+import json
+import base64
+import logging
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+# Cryptographic imports - using PyJWT with cryptography backend
+try:
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.backends import default_backend
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
+
+
+class AttestationStatus(Enum):
+    """Attestation lifecycle states."""
+    ISSUED = "issued"
+    VALID = "valid"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+    # Fail-closed states (Issue #188)
+    BLOCKED = "blocked"             # Signing attempted but failed — hard block
+    UNVERIFIABLE = "unverifiable"   # Cannot attempt signing (e.g. crypto unavailable)
+
+
+# Allowlist for key continuity policy values — typos silently degrade auditability
+ALLOWED_KEY_CONTINUITY_POLICIES = {"ephemeral"}
+
+
+@dataclass
+class AttestationResult:
+    """Explicit typed result for attestation creation (Issue #188).
+
+    Replaces the previous Optional[str] return that silently collapsed
+    signing failures into None, allowing callers to proceed without a
+    valid proof artifact.
+
+    Callers MUST check .is_issued before using .token:
+
+        result = create_verification_attestation(...)
+        if not result.is_issued:
+            raise RuntimeError(f"Attestation unavailable: {result.error_code}")
+        use(result.token)
+    """
+    status: AttestationStatus      # ISSUED | BLOCKED | UNVERIFIABLE
+    token: Optional[str]           # JWT string, present only when status == ISSUED
+    error_code: Optional[str]      # "SIGNING_FAILURE" | "CRYPTO_UNAVAILABLE" | None
+    error: Optional[str]           # Human-readable error detail
+
+    @property
+    def is_issued(self) -> bool:
+        """True only when the attestation was successfully signed and issued."""
+        return self.status is AttestationStatus.ISSUED
+
+
+@dataclass
+class VerificationResult:
+    """The result of a verification to be attested."""
+    status: str  # VERIFIED, FAILED, CORRECTED, BLOCKED
+    verified: bool
+    engine: str
+    confidence: float = 1.0
+    query_hash: Optional[str] = None
+    proof_hash: Optional[str] = None
+
+
+@dataclass
+class AttestationClaims:
+    """QWED Attestation JWT Claims."""
+    iss: str  # Issuer DID
+    sub: str  # Subject hash
+    iat: int  # Issued at
+    exp: int  # Expiration
+    jti: str  # Attestation ID
+    qwed: Dict[str, Any]  # QWED-specific claims
+
+
+@dataclass
+class Attestation:
+    """A complete QWED Attestation."""
+    jwt_token: str
+    claims: AttestationClaims
+    header: Dict[str, str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "jwt": self.jwt_token,
+            "jti": self.claims.jti,
+            "iss": self.claims.iss,
+            "iat": self.claims.iat,
+            "exp": self.claims.exp,
+            "result": self.claims.qwed.get("result", {}),
+        }
+
+
+class IssuerKeyPair:
+    """ECDSA P-256 key pair for attestation signing.
+
+    Key lifecycle policy (Issue #188):
+    - Every instance records generated_at and key_continuity_policy.
+    - A structured log entry is emitted on every new key generation so
+      continuity events are auditable.
+    - The only supported policy is "ephemeral" (in-memory, non-persistent).
+      Restarting the process generates a new key; previously issued
+      attestations cannot be verified after restart.
+    """
+
+    def __init__(
+        self,
+        issuer_did: str,
+        key_id: str,
+        key_continuity_policy: str = "ephemeral",
+    ):
+        if not HAS_CRYPTO:
+            raise RuntimeError("cryptography package required for attestations")
+
+        if key_continuity_policy not in ALLOWED_KEY_CONTINUITY_POLICIES:
+            raise ValueError(
+                f"Invalid key_continuity_policy: {key_continuity_policy!r}. "
+                f"Must be one of {sorted(ALLOWED_KEY_CONTINUITY_POLICIES)}"
+            )
+
+        self.issuer_did = issuer_did
+        self.key_id = key_id
+        self.key_continuity_policy = key_continuity_policy
+        self.generated_at: int = int(time.time())
+
+        # Generate ECDSA P-256 key pair
+        self._private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        self._public_key = self._private_key.public_key()
+
+        # Auditable key generation event
+        logger.info(
+            "attestation.key_generated issuer=%s key_id=%s policy=%s generated_at=%d",
+            issuer_did,
+            key_id,
+            key_continuity_policy,
+            self.generated_at,
+        )
+
+    @property
+    def private_key_pem(self) -> bytes:
+        """Get private key in PEM format."""
+        return self._private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+
+    @property
+    def public_key_pem(self) -> bytes:
+        """Get public key in PEM format."""
+        return self._public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+    @property
+    def jwk(self) -> Dict[str, Any]:
+        """Get public key as JWK for verification."""
+        numbers = self._public_key.public_numbers()
+
+        def int_to_base64url(n: int, length: int) -> str:
+            return base64.urlsafe_b64encode(
+                n.to_bytes(length, 'big')
+            ).decode().rstrip('=')
+
+        return {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": int_to_base64url(numbers.x, 32),
+            "y": int_to_base64url(numbers.y, 32),
+            "kid": self.key_id,
+        }
+
+
+# (#275) Single source of truth for the generic attestation rejection message.
+# Every caller-sensitive failure returns this exactly, so attackers cannot
+# enumerate trusted issuers, probe expirations, or read implementation state.
+_GENERIC_REJECTION_MSG = "Invalid token"
+
+
+class AttestationService:
+    """
+    Service for creating and verifying QWED attestations.
+
+    Implements the QWED-Attestation v1.0 specification.
+    """
+
+    def __init__(
+        self,
+        issuer_did: str = "did:qwed:infra:local",
+        validity_days: int = 365,
+        key_suffix: Optional[str] = None,
+        key_continuity_policy: str = "ephemeral",
+    ):
+        self.issuer_did = issuer_did
+        self.validity_days = validity_days
+
+        if key_continuity_policy not in ALLOWED_KEY_CONTINUITY_POLICIES:
+            raise ValueError(
+                f"Invalid key_continuity_policy: {key_continuity_policy!r}. "
+                f"Must be one of {sorted(ALLOWED_KEY_CONTINUITY_POLICIES)}"
+            )
+        self.key_continuity_policy = key_continuity_policy
+
+        # Key management - deterministic if key_suffix provided
+        suffix = key_suffix or "v1"
+        self.key_id = f"{issuer_did}#signing-key-{suffix}"
+        self._key_pair: Optional[IssuerKeyPair] = None
+
+        # Revocation tracking
+        self._revoked_attestations: set = set()
+
+        # Attestation registry (in-memory, should use DB in production)
+        self._attestations: Dict[str, Attestation] = {}
+
+        # Thread safety for lazy key initialization
+        self._key_lock: threading.Lock = threading.Lock()
+
+    def _ensure_key_pair(self) -> IssuerKeyPair:
+        """Lazily initialize key pair (thread-safe)."""
+        if self._key_pair is None:
+            with self._key_lock:
+                if self._key_pair is None:
+                    self._key_pair = IssuerKeyPair(
+                        self.issuer_did,
+                        self.key_id,
+                        key_continuity_policy=self.key_continuity_policy,
+                    )
+        return self._key_pair
+
+    def _hash_content(self, content: str) -> str:
+        """Create SHA-256 hash of content."""
+        return f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
+
+    def create_attestation(
+        self,
+        verification_result: VerificationResult,
+        original_query: str,
+        proof_data: Optional[str] = None,
+        chain_id: Optional[str] = None,
+        chain_index: Optional[int] = None,
+        issued_at: Optional[int] = None,
+        jti: Optional[str] = None,
+    ) -> Attestation:
+        """
+        Create a signed attestation for a verification result.
+
+        Args:
+            verification_result: The verification result to attest.
+            original_query:      The original query that was verified.
+            proof_data:          Optional proof data to include.
+            chain_id:            Optional chain ID for linked attestations.
+            chain_index:         Optional index in the chain.
+            issued_at:           Optional issuance epoch (injectable for determinism).
+            jti:                 Optional attestation ID (injectable for determinism).
+
+        Returns:
+            Attestation object with signed JWT.
+
+        Raises:
+            RuntimeError: if crypto is unavailable or signing fails.
+        """
+        now = issued_at if issued_at is not None else int(time.time())
+        expiry = now + (self.validity_days * 24 * 60 * 60)
+        attestation_id = jti if jti is not None else f"att_{uuid.uuid4().hex[:12]}"
+
+        # Fail-closed issuance: reject internally inconsistent requests before
+        # signing (#47).
+        if verification_result.status == "VERIFIED" and not verification_result.verified:
+            raise ValueError(
+                "VERIFIED attestation status requires verified=True."
+            )
+        if verification_result.verified and not proof_data:
+            raise ValueError(
+                "VERIFIED attestation requires proof_data — a token without a "
+                "proof_hash claim cannot bind to any evidence commitment."
+            )
+
+        # Build QWED-specific claims
+        qwed_claims = {
+            "version": "1.0",
+            "result": {
+                "status": verification_result.status,
+                "verified": verification_result.verified,
+                "engine": verification_result.engine,
+                "confidence": verification_result.confidence,
+            },
+            "query_hash": self._hash_content(original_query),
+        }
+
+        if proof_data:
+            qwed_claims["proof_hash"] = self._hash_content(proof_data)
+
+        if chain_id:
+            qwed_claims["chain_id"] = chain_id
+            if chain_index is not None:
+                qwed_claims["chain_index"] = chain_index
+
+        # Build full payload
+        payload = {
+            "iss": self.issuer_did,
+            "sub": self._hash_content(original_query),
+            "iat": now,
+            "exp": expiry,
+            "jti": attestation_id,
+            "qwed": qwed_claims,
+        }
+
+        # Validate encoded payload fits verify_attestation's 4096-byte limit
+        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
+        if len(payload_b64) > 4096:
+            raise ValueError(
+                f"Attestation payload too large ({len(payload_b64)} bytes) — "
+                f"must fit within 4096-byte verify-side limit"
+            )
+
+        key_pair = self._ensure_key_pair()
+
+        # Build header
+        header = {
+            "alg": "ES256",
+            "typ": "qwed-attestation+jwt",
+            "kid": key_pair.key_id,
+        }
+
+        # Sign the JWT
+        token = jwt.encode(
+            payload,
+            key_pair.private_key_pem,
+            algorithm="ES256",
+            headers=header,
+        )
+
+        claims = AttestationClaims(
+            iss=payload["iss"],
+            sub=payload["sub"],
+            iat=payload["iat"],
+            exp=payload["exp"],
+            jti=attestation_id,
+            qwed=qwed_claims,
+        )
+
+        attestation = Attestation(
+            jwt_token=token,
+            claims=claims,
+            header=header,
+        )
+
+        # Store in registry
+        self._attestations[attestation_id] = attestation
+
+        return attestation
+
+    def verify_attestation(
+        self,
+        jwt_token: str,
+        trusted_issuers: Optional[List[str]] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        """
+        Verify an attestation JWT.
+
+        Args:
+            jwt_token:        The JWT to verify.
+            trusted_issuers:  List of trusted issuer DIDs (None = trust self).
+
+        Returns:
+            Tuple of (is_valid, claims, error_message).
+        """
+        if trusted_issuers is None:
+            trusted_issuers = [self.issuer_did]
+
+        try:
+            # Boundary checks before any cryptographic work (fail fast on
+            # oversized or malformed input). No claim is trusted until the
+            # signature is verified below with the local key — jwt.decode
+            # performs payload parsing itself, so this layer never decodes
+            # attacker-controlled bytes.
+            if not isinstance(jwt_token, str):
+                return False, None, _GENERIC_REJECTION_MSG
+            segments = jwt_token.split(".")
+            if len(jwt_token) > 8192 or len(segments) != 3 or len(segments[1]) > 4096:
+                return False, None, _GENERIC_REJECTION_MSG
+
+            # Always select the local key; issuer authorization is applied only
+            # AFTER signature verification (no branch on unverified claims).
+            key_pair = self._ensure_key_pair()
+            public_key = key_pair.public_key_pem
+
+            # Verify signature and claims
+            claims = jwt.decode(
+                jwt_token,
+                public_key,
+                algorithms=["ES256"],
+                options={"verify_signature": True, "verify_exp": True, "require": ["iss", "sub", "iat", "exp", "jti"]},
+            )
+            if not isinstance(claims, dict):
+                return False, None, _GENERIC_REJECTION_MSG
+
+            # Now verified: apply issuer authorization. External issuers have no
+            # key resolution implemented (#275) — silent generic, never enumerate.
+            if claims.get("iss") != self.issuer_did:
+                logger.debug("Attestation issuer not supported (verified)")
+                return False, None, _GENERIC_REJECTION_MSG
+
+            if claims.get("iss") not in trusted_issuers:
+                logger.debug("Untrusted issuer (verified)")
+                return False, None, _GENERIC_REJECTION_MSG
+
+            # Check revocation
+            jti = claims.get("jti")
+            if jti in self._revoked_attestations:
+                logger.debug("Revoked attestation jti=%s rejected", jti)
+                return False, None, _GENERIC_REJECTION_MSG
+
+            return True, claims, None
+
+        except jwt.ExpiredSignatureError:
+            logger.debug("Attestation expired (silent)")
+            return False, None, _GENERIC_REJECTION_MSG
+        except jwt.InvalidTokenError as e:
+            logger.debug(f"Attestation verification failed (silent): {type(e).__name__}")
+            return False, None, _GENERIC_REJECTION_MSG
+        except RecursionError:
+            # Deeply nested payload segments can raise during JWT-internal JSON
+            # parsing — reject generically instead of escaping the boundary.
+            logger.debug("Attestation payload too deeply nested (silent)")
+            return False, None, _GENERIC_REJECTION_MSG
+        except (TypeError, ValueError):
+            # Non-string tokens and malformed structures fail closed.
+            return False, None, _GENERIC_REJECTION_MSG
+
+    def revoke_attestation(self, attestation_id: str) -> bool:
+        """Revoke an attestation by ID."""
+        self._revoked_attestations.add(attestation_id)
+        return True
+
+    def get_attestation(self, attestation_id: str) -> Optional[Attestation]:
+        """Get an attestation by ID."""
+        return self._attestations.get(attestation_id)
+
+    def get_issuer_info(self) -> Dict[str, Any]:
+        """Get issuer information for registry, including key lifecycle metadata."""
+        key_pair = self._ensure_key_pair()
+        return {
+            "did": self.issuer_did,
+            "name": "QWED Infra Local Node",
+            "public_keys": [key_pair.jwk],
+            "status": "active",
+            "certification_level": "basic",
+            # Key lifecycle fields (Issue #188)
+            "key_generated_at": key_pair.generated_at,
+            "key_continuity_policy": key_pair.key_continuity_policy,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton (double-checked locking: concurrent first callers
+# must not install different services — each service has its own ephemeral
+# key, and a lost race would make valid tokens fail verification).
+# ---------------------------------------------------------------------------
+
+_default_service: Optional[AttestationService] = None
+_singleton_lock: threading.Lock = threading.Lock()
+
+
+def get_attestation_service() -> AttestationService:
+    """Get the default attestation service (thread-safe lazy init)."""
+    global _default_service
+    if _default_service is None:
+        with _singleton_lock:
+            if _default_service is None:
+                _default_service = AttestationService()
+    return _default_service
+
+
+def create_verification_attestation(
+    status: str,
+    verified: bool,
+    engine: str,
+    query: str,
+    confidence: float = 1.0,
+    proof_data: Optional[str] = None,
+) -> AttestationResult:
+    """Create a signed attestation for a verification result.
+
+    Returns an :class:`AttestationResult` — **never** ``None``.
+
+    The caller MUST check ``result.is_issued`` before using ``result.token``:
+
+        result = create_verification_attestation(...)
+        if not result.is_issued:
+            # Hard-block: do not proceed as VERIFIED without proof artifact
+            raise RuntimeError(f"Attestation unavailable [{result.error_code}]")
+
+    Failure semantics (Issue #188 — fail-closed contract):
+    - ``BLOCKED``       — crypto is available but signing failed (key error, JWT error, etc.)
+    - ``UNVERIFIABLE``  — crypto package not installed; cannot attempt signing
+
+    Args:
+        status:      Verification status string (e.g. "VERIFIED", "FAILED").
+        verified:    Whether the result was verified.
+        engine:      Verification engine name.
+        query:       The original query string.
+        confidence:  Confidence score (0.0–1.0).
+        proof_data:  Optional proof artifact string.
+
+    Returns:
+        AttestationResult with status "ISSUED", "BLOCKED", or "UNVERIFIABLE".
+    """
+    if not HAS_CRYPTO:
+        logger.warning(
+            "attestation.unverifiable query_hash=%s reason=CRYPTO_UNAVAILABLE",
+            hashlib.sha256(query.encode()).hexdigest()[:16],
+        )
+        return AttestationResult(
+            status=AttestationStatus.UNVERIFIABLE,
+            token=None,
+            error_code="CRYPTO_UNAVAILABLE",
+            error="cryptography/PyJWT package not installed",
+        )
+
+    if verified and not proof_data:
+        logger.warning(
+            "attestation.blocked query_hash=%s reason=VERIFIED_WITHOUT_PROOF",
+            hashlib.sha256(query.encode()).hexdigest()[:16],
+        )
+        return AttestationResult(
+            status=AttestationStatus.BLOCKED,
+            token=None,
+            error_code="VERIFIED_WITHOUT_PROOF",
+            error="VERIFIED status requires proof_data — cannot sign attestation without proof artifact",
+        )
+
+    try:
+        service = get_attestation_service()
+        result = VerificationResult(
+            status=status,
+            verified=verified,
+            engine=engine,
+            confidence=confidence,
+        )
+        attestation = service.create_attestation(result, query, proof_data)
+        return AttestationResult(
+            status=AttestationStatus.ISSUED,
+            token=attestation.jwt_token,
+            error_code=None,
+            error=None,
+        )
+    except Exception:
+        logger.exception(
+            "attestation.blocked query_hash=%s reason=SIGNING_FAILURE",
+            hashlib.sha256(query.encode()).hexdigest()[:16],
+        )
+        return AttestationResult(
+            status=AttestationStatus.BLOCKED,
+            token=None,
+            error_code="SIGNING_FAILURE",
+            error="Attestation signing failed — see logs for detail",
+        )
+
+
+def mint_diagnostic_attestation(
+    result,  # InfraDiagnosticResult (avoids a circular import)
+    engine: str,
+    query: str,
+    confidence: float = 1.0,
+) -> "AttestationResult":
+    """Issue an attestation bound to a VERIFIED diagnostic (issue #47).
+
+    Convenience wrapper over :func:`create_verification_attestation` that
+    binds the token to the diagnostic's own evidence commitment: the token's
+    ``qwed.proof_hash`` claim equals ``result.proof_ref`` and its
+    ``qwed.query_hash`` equals sha256(query). The bridge's trust boundary
+    validates exactly these bindings before admitting.
+
+    Args:
+        result: A VERIFIED InfraDiagnosticResult carrying ``proof_data``
+            (set automatically by the ``verified()`` factory).
+        engine: Verifier name recorded in the attested claims.
+        query: The formal statement being attested.
+
+    Returns:
+        AttestationResult — check ``.is_issued`` before using ``.token``.
+    """
+    return create_verification_attestation(
+        status=result.status.value if hasattr(result.status, "value") else str(result.status),
+        verified=result.status.value == "VERIFIED" if hasattr(result.status, "value") else bool(result.proof_ref),
+        engine=engine,
+        query=query,
+        confidence=confidence,
+        proof_data=result.proof_data,
+    )

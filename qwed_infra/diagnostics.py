@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -85,6 +85,86 @@ def compute_proof_ref(evidence: Dict[str, Any]) -> str:
     return f"sha256:{digest}"
 
 
+def _parse_status(raw_status: Any) -> InfraDiagnosticStatus:
+    """Parse and validate a serialized diagnostic status (fail-closed)."""
+    if raw_status is None:
+        raise ValueError("from_dict: 'status' is required — no default.")
+    if isinstance(raw_status, InfraDiagnosticStatus):
+        return raw_status
+    if isinstance(raw_status, str):
+        try:
+            return InfraDiagnosticStatus(raw_status)
+        except ValueError:
+            pass
+    valid = ", ".join(s.value for s in InfraDiagnosticStatus)
+    raise ValueError(
+        f"from_dict: invalid status {raw_status!r} — must be one of: {valid}."
+    )
+
+
+def _validated_proof_pair(proof_ref: Any, proof_data: Any) -> Optional[str]:
+    """Validate a serialized (proof_ref, proof_data) pair; return proof_data.
+
+    Fail-closed integrity check: whenever both are present, proof_data must
+    commit to proof_ref — including the empty-string case, which would
+    otherwise skip validation and allow a tampered pair through.
+    """
+    if proof_data is not None and not isinstance(proof_data, str):
+        raise ValueError("'proof_data' must be a string or None.")
+    if proof_ref is not None and proof_data is not None:
+        expected = f"sha256:{hashlib.sha256(proof_data.encode('utf-8')).hexdigest()}"
+        if expected != proof_ref:
+            raise ValueError(
+                "'proof_data' does not commit to 'proof_ref' — "
+                "the diagnostic's evidence commitment is inconsistent."
+            )
+    return proof_data
+
+
+def _validate_verified_invariants(result) -> None:
+    """VERIFIED-only invariants: proof artifact, audit trace, evidence commitment."""
+    if not result.proof_ref:
+        raise ValueError(
+            "VERIFIED status requires proof_ref is not None and non-empty — "
+            "a claim cannot be marked proven without a proof artifact hash. "
+            "Use UNVERIFIABLE if no proof was established."
+        )
+    if "audit_trace" not in result.developer_fields:
+        raise ValueError(
+            "VERIFIED status requires 'audit_trace' in developer_fields — "
+            "a proved claim must reference its audit trace."
+        )
+    # #47 proof commitment: proof_data must be present and hash to
+    # proof_ref on EVERY construction path (factory, from_dict, direct),
+    # so serialized evidence can never diverge from the attested
+    # commitment. The dataclass is frozen, which prevents later mutation.
+    _validated_proof_pair(result.proof_ref, result.proof_data)
+    if not isinstance(result.proof_data, str) or not result.proof_data:
+        raise ValueError(
+            "VERIFIED status requires non-empty proof_data — the canonical "
+            "evidence string that commits to proof_ref. Attestations bind "
+            "qwed.proof_hash to it (#47)."
+        )
+
+
+def _validate_non_verified_invariants(result) -> None:
+    """Non-VERIFIED invariants: no proof artifacts may survive a demotion."""
+    if result.proof_ref is not None:
+        raise ValueError(
+            f"{result.status.value} status requires proof_ref is None — "
+            "non-VERIFIED states are non-authoritative by construction."
+        )
+
+    # proof_data is the VERIFIED evidence commitment aid; carrying it on a
+    # non-VERIFIED result would be an inconsistent state (e.g. a stale
+    # value surviving a status demotion via dataclasses.replace).
+    if result.proof_data is not None:
+        raise ValueError(
+            f"{result.status.value} status requires proof_data is None — "
+            "the canonical evidence string exists only for VERIFIED results."
+        )
+
+
 @dataclass(frozen=True)
 class InfraDiagnosticResult:
     """Unified 3-layer infra verification diagnostic result.
@@ -98,6 +178,11 @@ class InfraDiagnosticResult:
     agent_message: str
     developer_fields: Dict[str, Any] = field(default_factory=dict)
     proof_ref: Optional[str] = None
+    # Canonical evidence string whose sha256 == proof_ref (VERIFIED only).
+    # Retained so attestations can bind qwed.proof_hash to this exact
+    # evidence commitment (issue #47), mirroring qwed-verification's
+    # proof_data=str(evidence) issuance flow.
+    proof_data: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, InfraDiagnosticStatus):
@@ -114,23 +199,9 @@ class InfraDiagnosticResult:
             raise ValueError("developer_fields must be a dict")
 
         if self.status is InfraDiagnosticStatus.VERIFIED:
-            if not self.proof_ref:
-                raise ValueError(
-                    "VERIFIED status requires proof_ref is not None and non-empty — "
-                    "a claim cannot be marked proven without a proof artifact hash. "
-                    "Use UNVERIFIABLE if no proof was established."
-                )
-            if "audit_trace" not in self.developer_fields:
-                raise ValueError(
-                    "VERIFIED status requires 'audit_trace' in developer_fields — "
-                    "a proved claim must reference its audit trace."
-                )
-
-        if self.status is not InfraDiagnosticStatus.VERIFIED and self.proof_ref is not None:
-            raise ValueError(
-                f"{self.status.value} status requires proof_ref is None — "
-                "non-VERIFIED states are non-authoritative by construction."
-            )
+            _validate_verified_invariants(self)
+        else:
+            _validate_non_verified_invariants(self)
 
     @property
     def is_verified(self) -> bool:
@@ -181,32 +252,13 @@ class InfraDiagnosticResult:
             "agent_message": self.agent_message,
             "developer_fields": fields,
             "proof_ref": self.proof_ref,
+            "proof_data": self.proof_data,
             "is_authoritative": self.is_authoritative,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InfraDiagnosticResult":
-        raw_status = data.get("status")
-        if raw_status is None:
-            raise ValueError("from_dict: 'status' is required — no default.")
-        if isinstance(raw_status, str):
-            try:
-                status = InfraDiagnosticStatus(raw_status)
-            except ValueError:
-                valid = ", ".join(s.value for s in InfraDiagnosticStatus)
-                raise ValueError(
-                    f"from_dict: invalid status {raw_status!r} — "
-                    f"must be one of: {valid}."
-                ) from None
-        elif isinstance(raw_status, InfraDiagnosticStatus):
-            status = raw_status
-        else:
-            valid = ", ".join(s.value for s in InfraDiagnosticStatus)
-            raise ValueError(
-                f"from_dict: invalid status type {type(raw_status).__name__} — "
-                f"must be one of: {valid}."
-            )
-
+        status = _parse_status(data.get("status"))
         agent_message = data.get("agent_message")
         if not isinstance(agent_message, str) or not agent_message.strip():
             raise ValueError(
@@ -218,11 +270,26 @@ class InfraDiagnosticResult:
         if not isinstance(developer_fields, dict):
             raise ValueError("from_dict: 'developer_fields' must be a dict.")
 
+        proof_ref = data.get("proof_ref")
+        proof_data = _validated_proof_pair(proof_ref, data.get("proof_data"))
+
+        if status is InfraDiagnosticStatus.VERIFIED and not proof_data:
+            # Deliberately fail-closed: this payload predates the #47
+            # evidence-commitment contract. Without its canonical evidence it
+            # can never be attested, so it cannot load as VERIFIED under
+            # VC v1.0 attestation rules - re-run the verification to regenerate.
+            raise ValueError(
+                "from_dict: VERIFIED diagnostic has no 'proof_data' — "
+                "pre-attestation payloads cannot be loaded under VC v1.0 "
+                "attestation rules (#47). Re-run the verification to regenerate."
+            )
+
         return cls(
             status=status,
             agent_message=agent_message,
             developer_fields=developer_fields,
-            proof_ref=data.get("proof_ref"),
+            proof_ref=proof_ref,
+            proof_data=proof_data,
         )
 
     @classmethod
@@ -232,11 +299,18 @@ class InfraDiagnosticResult:
         developer_fields: Dict[str, Any],
         evidence: Dict[str, Any],
     ) -> "InfraDiagnosticResult":
+        try:
+            payload = json.dumps(evidence, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Proof evidence must be JSON-serializable for proof_ref hashing: {exc}"
+            ) from exc
         return cls(
             status=InfraDiagnosticStatus.VERIFIED,
             agent_message=agent_message,
             developer_fields=developer_fields,
-            proof_ref=compute_proof_ref(evidence),
+            proof_ref=f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}",
+            proof_data=payload,
         )
 
     @classmethod
@@ -271,4 +345,252 @@ __all__ = [
     "InfraDiagnosticResult",
     "InfraAdvisoryCheck",
     "compute_proof_ref",
+    "enforce_trust_decision",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Trust boundary enforcement — consumption-side attestation validation (#47).
+# Mirrors qwed-verification's enforce_trust_decision: no trust-boundary path
+# can return/consume effective VERIFIED without a required attestation artifact.
+# ---------------------------------------------------------------------------
+
+def _compute_query_hash(query: str) -> str:
+    """Compute a query hash in the same format as AttestationService._hash_content."""
+    return f"sha256:{hashlib.sha256(query.encode('utf-8')).hexdigest()}"
+
+
+def _verify_attestation_token(
+    attestation_token: str,
+    trusted_issuers: Optional[List[str]],
+    result: "InfraDiagnosticResult",
+    policy: str,
+) -> "InfraDiagnosticResult | tuple[bool, Dict[str, Any], Optional[str]]":
+    """Verify the attestation token. Returns (is_valid, claims, error) or a blocked result."""
+    try:
+        from .attestation import get_attestation_service
+
+        service = get_attestation_service()
+        is_valid, token_claims, error = service.verify_attestation(
+            attestation_token,
+            trusted_issuers=trusted_issuers,
+        )
+    except Exception as exc:
+        # Record the exception type only — never args/message — so no internal
+        # detail (paths, keys, stack context) leaks into developer_fields.
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — proof artifact verification failed",
+            developer_fields={
+                "constraint_id": "trust_gate.attestation_verification_error",
+                "error_type": type(exc).__name__,
+                "policy": policy,
+                "verdict_status": result.status.value,
+                "verdict_proof_ref": result.proof_ref,
+            },
+        )
+
+    if not is_valid:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — proof artifact invalid",
+            developer_fields={
+                "constraint_id": "trust_gate.invalid_attestation_token",
+                "validation_error": error,
+                "policy": policy,
+                "verdict_status": result.status.value,
+                "verdict_proof_ref": result.proof_ref,
+            },
+        )
+
+    return is_valid, token_claims, error
+
+
+def _validate_attestation_claims(
+    result: "InfraDiagnosticResult",
+    token_claims: Dict[str, Any],
+    query: Optional[str],
+    policy: str,
+) -> Optional["InfraDiagnosticResult"]:
+    """Validate token claims against result. Returns a blocked result or None.
+
+    Binding checks (all must hold for VERIFIED to survive enforcement):
+    - qwed.result.status == result.status          (attested outcome matches)
+    - qwed.query_hash   == sha256(formal_statement) (attested claim matches the
+      formal statement — closes the statement-overclaim vector)
+    - qwed.proof_hash   == result.proof_ref         (attested evidence hash matches
+      the diagnostic's evidence commitment)
+    """
+    raw_qwed = (token_claims or {}).get("qwed")
+    qwed_claims = raw_qwed if isinstance(raw_qwed, dict) else None
+    raw_result_claims = qwed_claims.get("result") if qwed_claims else None
+    result_claims = raw_result_claims if isinstance(raw_result_claims, dict) else None
+    if result_claims is None:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation claims missing or malformed",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_missing",
+                "policy": policy,
+            },
+        )
+
+    token_status = result_claims.get("status")
+    if token_status != result.status.value:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation claims do not match result status",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_status_mismatch",
+                "token_status": token_status,
+                "result_status": result.status.value,
+                "policy": policy,
+            },
+        )
+
+    # A VERIFIED result must carry an attestation whose claims affirm
+    # verification (status and verified flag agree); legacy or hand-crafted
+    # tokens asserting VERIFIED/verified=False are rejected here even if a
+    # pre-dating issuer signed them (#47).
+    if result.status is InfraDiagnosticStatus.VERIFIED and result_claims.get("verified") is not True:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation does not affirm verification",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_verified_mismatch",
+                "token_verified": result_claims.get("verified"),
+                "policy": policy,
+            },
+        )
+
+    if query is not None:
+        expected_query_hash = _compute_query_hash(query)
+        token_query_hash = qwed_claims.get("query_hash")
+        if token_query_hash != expected_query_hash:
+            return InfraDiagnosticResult.blocked(
+                agent_message="Verification blocked — attestation query hash does not match",
+                developer_fields={
+                    "constraint_id": "trust_gate.claims_query_mismatch",
+                    "expected_query_hash": expected_query_hash,
+                    "token_query_hash": token_query_hash,
+                    "policy": policy,
+                },
+            )
+
+    token_proof_hash = qwed_claims.get("proof_hash")
+    if token_proof_hash is None:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation carries no proof hash",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_proof_missing",
+                "result_proof_ref": result.proof_ref,
+                "policy": policy,
+            },
+        )
+    if token_proof_hash != result.proof_ref:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation proof hash does not match result",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_proof_mismatch",
+                "token_proof_hash": token_proof_hash,
+                "result_proof_ref": result.proof_ref,
+                "policy": policy,
+            },
+        )
+
+    return None
+
+
+def enforce_trust_decision(
+    result: InfraDiagnosticResult,
+    *,
+    attestation_token: Optional[str] = None,
+    require_attestation: bool = True,
+    trusted_issuers: Optional[List[str]] = None,
+    query: Optional[str] = None,
+) -> InfraDiagnosticResult:
+    """Enforce trust-boundary gate: VERIFIED without required attestation → BLOCKED.
+
+    Single enforcement point for consumption-side attestation validation
+    (mirrors qwed-verification). Every admission decision MUST route VERIFIED
+    results through this function before admitting.
+
+    Args:
+        result: The verification InfraDiagnosticResult from the guard.
+        attestation_token: JWT attestation token from
+            attestation.create_verification_attestation. May be None.
+        require_attestation: If True (default), VERIFIED without a valid
+            attestation token fails closed (caller maps it per policy).
+        trusted_issuers: Optional list of trusted issuer DIDs.
+        query: Formal statement for query_hash binding validation. REQUIRED
+            whenever attestation_token is provided: the token's qwed.query_hash
+            must equal sha256(query), binding the attestation to the exact
+            claim so overclaiming statements and cross-claim token reuse fail.
+            Omitting it with a token present is API misuse and raises.
+
+    Returns:
+        The original InfraDiagnosticResult if all checks pass, or a BLOCKED
+        InfraDiagnosticResult on any failure (missing/invalid token, mismatched
+        claims). Fail-closed statuses pass through unchanged.
+
+    Raises:
+        ValueError: if attestation_token is provided without query — token
+            binding to a formal statement is mandatory, never skippable.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    policy = "mandatory" if require_attestation else "optional"
+
+    # #47: binding is mandatory whenever a token is in play. An optional-skip
+    # here would let any external caller reuse one statement's attestation for
+    # another by simply omitting the argument.
+    if attestation_token is not None and query is None:
+        raise ValueError(
+            "enforce_trust_decision: 'query' is required when "
+            "'attestation_token' is provided — the attestation must bind to "
+            "the exact formal statement."
+        )
+
+    # Deep-copy detach: the caller keeps a mutable dict; validation and any
+    # returned result must not alias caller-mutable state.
+    try:
+        import copy as _copy
+
+        result = replace(result, developer_fields=_copy.deepcopy(result.developer_fields))
+    except Exception as exc:
+        logger.warning(
+            "trust_gate.blocked reason=diagnostic_snapshot_failed policy=%s error_type=%s",
+            policy,
+            type(exc).__name__,
+        )
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — diagnostic snapshot failed",
+            developer_fields={
+                "constraint_id": "trust_gate.diagnostic_snapshot_failed",
+                "policy": policy,
+            },
+        )
+
+    if result.is_fail_closed:
+        return result
+
+    if not attestation_token:
+        if not require_attestation:
+            return result
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — proof artifact missing",
+            developer_fields={
+                "constraint_id": "trust_gate.mandatory_attestation_missing",
+                "missing": "attestation_token",
+                "policy": policy,
+                "verdict_status": result.status.value,
+                "verdict_proof_ref": result.proof_ref,
+            },
+        )
+
+    verification = _verify_attestation_token(attestation_token, trusted_issuers, result, policy)
+    if isinstance(verification, InfraDiagnosticResult):
+        return verification
+    _is_valid, token_claims, _error = verification
+
+    validation = _validate_attestation_claims(result, token_claims, query, policy)
+    if validation is not None:
+        return validation
+
+    return result

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from qwed_infra.attestation import mint_diagnostic_attestation
 from qwed_infra.diagnostics import InfraDiagnosticResult
 from qwed_infra.guards.artifact_boundary_guard import ArtifactBoundaryGuard
 from qwed_infra.guards.cost_guard import CostGuard
@@ -31,8 +32,45 @@ from qwed_infra.verification_context import (
 )
 from qwed_infra.verification_context_bridge import verification_context_from_diagnostic_result
 
-ATTESTATION = "attestation-fixture-opaque"
 FORMAL_STATEMENT = "The infrastructure claim is safe to apply"
+# Opaque token for non-VERIFIED paths (attestation enforcement never runs there).
+OPAQUE_TOKEN = "attestation-fixture-opaque"
+
+
+def _mint_for(guard, inputs: dict) -> str:
+    """Mint a valid #47 attestation bound to the diagnostic the guard computes.
+
+    Runs the guard's public compute + to_diagnostic path so the token binds to
+    the exact evidence commitment the bridge will validate against.
+    """
+    from qwed_infra.guards.artifact_boundary_guard import ArtifactBoundaryGuard as ABG
+
+    if isinstance(guard, IamGuard):
+        d = IamGuard.to_diagnostic(guard.verify_access(inputs["policy"], inputs["action"], inputs["resource"]))
+        engine = "IamGuard"
+    elif isinstance(guard, NetworkGuard):
+        d = NetworkGuard.to_diagnostic(
+            guard.verify_reachability(inputs["resources"], inputs["source"], inputs["destination"], inputs["port"])
+        )
+        engine = "NetworkGuard"
+    elif isinstance(guard, CostGuard):
+        d = CostGuard.to_diagnostic(guard.verify_budget(inputs["resources"], inputs["budget_monthly"]))
+        engine = "CostGuard"
+    elif isinstance(guard, ABG):
+        pkg = Path(inputs["package_dir"])
+        d = ABG.to_diagnostic(
+            guard.verify_package_boundary(
+                package_dir=inputs["package_dir"],
+                pyproject_path=inputs.get("pyproject_path"),
+                package_name=pkg.name,
+            )
+        )
+        engine = "ArtifactBoundaryGuard"
+    else:
+        raise TypeError(f"unsupported guard: {guard!r}")
+    att = mint_diagnostic_attestation(d, engine=engine, query=FORMAL_STATEMENT)
+    assert att.is_issued
+    return att.token
 
 
 # ----------------------------------------------------------------------
@@ -148,12 +186,15 @@ class TestBridgeStatusConformance:
         )
 
     def test_verified_with_attestation_verified_document(self):
+        from qwed_infra.attestation import mint_diagnostic_attestation
+
         result = InfraDiagnosticResult.verified(
             agent_message="verified",
             developer_fields={"constraint_id": "conformance", "audit_trace": {"rule_id": "R", "outcome": "ALLOWED"}},
             evidence={"constraint_id": "conformance", "audit_trace": {"rule_id": "R", "outcome": "ALLOWED"}},
         )
-        vc = self._bridge(result, attestation_token=ATTESTATION)
+        att = mint_diagnostic_attestation(result, engine="Conformance", query=FORMAL_STATEMENT)
+        vc = self._bridge(result, attestation_token=att.token)
         assert vc.verdict == Verdict.VERIFIED
         assert vc.context.decision.admission == Admission.ADMIT
         doc = vc.to_dict()
@@ -178,7 +219,7 @@ class TestBridgeStatusConformance:
             agent_message="unverifiable",
             developer_fields={"constraint_id": "conformance", "audit_trace": {"rule_id": "R", "outcome": "UNVERIFIABLE"}},
         )
-        vc = self._bridge(result, attestation_token=ATTESTATION)
+        vc = self._bridge(result, attestation_token=OPAQUE_TOKEN)
         assert vc.verdict == Verdict.UNVERIFIABLE
         assert vc.context.decision.admission == Admission.DENY
         assert vc.context.evidence.proof_ref is None
@@ -189,7 +230,7 @@ class TestBridgeStatusConformance:
             agent_message="blocked",
             developer_fields={"constraint_id": "conformance", "audit_trace": {"rule_id": "R", "outcome": "BLOCKED"}},
         )
-        vc = self._bridge(result, attestation_token=ATTESTATION)
+        vc = self._bridge(result, attestation_token=OPAQUE_TOKEN)
         assert vc.verdict == Verdict.BLOCKED
         assert vc.context.decision.admission == Admission.DENY
         assert vc.context.evidence.proof_ref is None
@@ -269,7 +310,7 @@ class TestGuardDocumentConformance:
         vc = guard.to_verification_context(
             **make_inputs(),
             formal_statement=FORMAL_STATEMENT,
-            attestation_token=ATTESTATION,
+            attestation_token=_mint_for(guard, make_inputs()),
         )
         assert vc.verdict == Verdict.VERIFIED
         assert vc.context.decision.admission == Admission.ADMIT
@@ -293,10 +334,11 @@ class TestGuardDocumentConformance:
 
     def test_artifact_boundary_guard_document_valid(self, tmp_path):
         guard = ArtifactBoundaryGuard()
+        inputs = _artifact_safe_inputs(tmp_path)
         vc = guard.to_verification_context(
-            **_artifact_safe_inputs(tmp_path),
+            **inputs,
             formal_statement=FORMAL_STATEMENT,
-            attestation_token=ATTESTATION,
+            attestation_token=_mint_for(guard, inputs),
         )
         assert vc.verdict == Verdict.VERIFIED
         assert vc.context.decision.admission == Admission.ADMIT
@@ -323,7 +365,7 @@ class TestGuardViolationConformance:
         vc = guard.to_verification_context(
             **make_inputs(),
             formal_statement=FORMAL_STATEMENT,
-            attestation_token=ATTESTATION,
+            attestation_token=_mint_for(guard, make_inputs()),
         )
         assert vc.context.decision.admission == Admission.DENY
         assert vc.verdict in (Verdict.UNVERIFIABLE, Verdict.BLOCKED)
@@ -335,7 +377,7 @@ class TestGuardViolationConformance:
         vc = guard.to_verification_context(
             **_artifact_unsafe_inputs(tmp_path),
             formal_statement=FORMAL_STATEMENT,
-            attestation_token=ATTESTATION,
+            attestation_token=OPAQUE_TOKEN,
         )
         assert vc.context.decision.admission == Admission.DENY
         assert vc.verdict == Verdict.BLOCKED
@@ -348,7 +390,7 @@ class TestGuardViolationConformance:
         vc = guard.to_verification_context(
             **_cost_unknown_type_inputs(),
             formal_statement=FORMAL_STATEMENT,
-            attestation_token=ATTESTATION,
+            attestation_token=OPAQUE_TOKEN,
         )
         assert vc.context.decision.admission == Admission.DENY
         assert vc.verdict == Verdict.BLOCKED
@@ -377,7 +419,7 @@ class TestGuardMalformedInputConformance:
         vc = guard.to_verification_context(
             **make_inputs,
             formal_statement=FORMAL_STATEMENT,
-            attestation_token=ATTESTATION,
+            attestation_token=OPAQUE_TOKEN,
         )
         assert vc.context.decision.admission == Admission.DENY
         assert vc.verdict in (Verdict.UNVERIFIABLE, Verdict.BLOCKED)
