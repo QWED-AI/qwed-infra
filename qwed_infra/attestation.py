@@ -292,10 +292,12 @@ class AttestationService:
         expiry = now + (self.validity_days * 24 * 60 * 60)
         attestation_id = jti if jti is not None else f"att_{uuid.uuid4().hex[:12]}"
 
-        # Fail-closed issuance: a VERIFIED attestation without proof_data would
-        # carry no qwed.proof_hash claim, so it could never bind to a
-        # diagnostic's evidence commitment at the trust boundary (#47). Reject
-        # at mint time instead of letting enforcement block it later.
+        # Fail-closed issuance: reject internally inconsistent requests before
+        # signing (#47).
+        if verification_result.status == "VERIFIED" and not verification_result.verified:
+            raise ValueError(
+                "VERIFIED attestation status requires verified=True."
+            )
         if verification_result.verified and not proof_data:
             raise ValueError(
                 "VERIFIED attestation requires proof_data — a token without a "

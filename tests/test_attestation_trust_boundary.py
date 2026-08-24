@@ -107,10 +107,22 @@ class TestEnforceTrustDecisionFailClosed:
     def test_forged_token_blocked(self):
         result = _verified_diagnostic()
         enforced = enforce_trust_decision(
-            result, attestation_token="not-a-jwt", require_attestation=True
+            result,
+            attestation_token="not-a-jwt",
+            require_attestation=True,
+            query=STATEMENT,
         )
         assert enforced.status.value == "BLOCKED"
         assert enforced.developer_fields["constraint_id"] == "trust_gate.invalid_attestation_token"
+
+    def test_token_without_query_is_api_misuse(self):
+        """#47: a token with no statement to bind against raises - the
+        query_hash binding check can never be skipped by omitting the arg."""
+        result = _verified_diagnostic()
+        with pytest.raises(ValueError):
+            enforce_trust_decision(
+                result, attestation_token="not-a-jwt", require_attestation=True
+            )
 
     def test_valid_token_with_matching_claims_passes(self):
         result = _verified_diagnostic()
@@ -220,9 +232,10 @@ class TestEnforceTrustDecisionFailClosed:
         )
 
         service = get_attestation_service()
+        conflicting = AVR(status="VERIFIED", verified=True, engine="x")
         with pytest.raises(ValueError):
             service.create_attestation(
-                AVR(status="VERIFIED", verified=True, engine="x"),
+                conflicting,
                 original_query=STATEMENT,
             )
 
@@ -243,9 +256,10 @@ class TestEnforceTrustDecisionFailClosed:
         key_pair = service._ensure_key_pair()
 
         # 1. Issuance rejects the conflicting request outright.
+        conflicting = AVR(status="VERIFIED", verified=False, engine="x")
         with pytest.raises(ValueError):
             service.create_attestation(
-                AVR(status="VERIFIED", verified=False, engine="x"),
+                conflicting,
                 original_query=STATEMENT,
                 proof_data="proof",
             )

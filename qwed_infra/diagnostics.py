@@ -414,6 +414,20 @@ def _validate_attestation_claims(
             },
         )
 
+    # A VERIFIED result must carry an attestation whose claims affirm
+    # verification (status and verified flag agree); legacy or hand-crafted
+    # tokens asserting VERIFIED/verified=False are rejected here even if a
+    # pre-dating issuer signed them (#47).
+    if result.status is InfraDiagnosticStatus.VERIFIED and result_claims.get("verified") is not True:
+        return InfraDiagnosticResult.blocked(
+            agent_message="Verification blocked — attestation does not affirm verification",
+            developer_fields={
+                "constraint_id": "trust_gate.claims_verified_mismatch",
+                "token_verified": result_claims.get("verified"),
+                "policy": policy,
+            },
+        )
+
     if query is not None:
         expected_query_hash = _compute_query_hash(query)
         token_query_hash = qwed_claims.get("query_hash")
@@ -473,19 +487,35 @@ def enforce_trust_decision(
         require_attestation: If True (default), VERIFIED without a valid
             attestation token fails closed (caller maps it per policy).
         trusted_issuers: Optional list of trusted issuer DIDs.
-        query: Formal statement for query_hash binding validation. When given,
-            the token's qwed.query_hash must equal sha256(query) — binding the
-            attestation to the exact claim, so overclaiming statements fail.
+        query: Formal statement for query_hash binding validation. REQUIRED
+            whenever attestation_token is provided: the token's qwed.query_hash
+            must equal sha256(query), binding the attestation to the exact
+            claim so overclaiming statements and cross-claim token reuse fail.
+            Omitting it with a token present is API misuse and raises.
 
     Returns:
         The original InfraDiagnosticResult if all checks pass, or a BLOCKED
         InfraDiagnosticResult on any failure (missing/invalid token, mismatched
         claims). Fail-closed statuses pass through unchanged.
+
+    Raises:
+        ValueError: if attestation_token is provided without query — token
+            binding to a formal statement is mandatory, never skippable.
     """
     import logging
 
     logger = logging.getLogger(__name__)
     policy = "mandatory" if require_attestation else "optional"
+
+    # #47: binding is mandatory whenever a token is in play. An optional-skip
+    # here would let any external caller reuse one statement's attestation for
+    # another by simply omitting the argument.
+    if attestation_token is not None and query is None:
+        raise ValueError(
+            "enforce_trust_decision: 'query' is required when "
+            "'attestation_token' is provided — the attestation must bind to "
+            "the exact formal statement."
+        )
 
     # Deep-copy detach: the caller keeps a mutable dict; validation and any
     # returned result must not alias caller-mutable state.
