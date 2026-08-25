@@ -234,6 +234,9 @@ diagnostic = NetworkGuard.to_diagnostic(
 attestation = mint_diagnostic_attestation(
     diagnostic, engine="NetworkGuard", query=statement
 )
+if not attestation.is_issued:
+    # fail-closed contract: never proceed on an unissued attestation
+    raise RuntimeError(f"Attestation unavailable [{attestation.error_code}]")
 
 doc = net.to_verification_context(
     infra,                       # raw topology — the guard verifies this itself
