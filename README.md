@@ -203,7 +203,7 @@ A `True/False` return value is enough for one process — but CI/CD pipelines, r
 | Lives only in your process log | JSON-serializable, schema-validated, evidence-bound (`sha256` proof_ref computed over the exact evidence) |
 | No story when someone asks "who verified this?" | `proof.verifier`, `audit_trace`, and rule IDs answer it |
 
-The document is **fail-closed by construction**: anything that is not proven is `DENY` — `UNVERIFIABLE` and `BLOCKED` outcomes can never produce `ADMIT`. Note that in v1.0 the attestation token is checked for **presence only** — cryptographic validation (signature/issuer/expiry/claim binding) lands with #47.
+The document is **fail-closed by construction**: anything that is not proven is `DENY` — `UNVERIFIABLE` and `BLOCKED` outcomes can never produce `ADMIT`. Attestations are **cryptographically validated** (ES256 signature, issuer, expiry, revocation) and bound to the exact claim and evidence (`query_hash`, `proof_hash`) — a token minted for one statement can never admit another.
 
 ### Usage
 
@@ -211,6 +211,7 @@ Each guard runs its own verification internally and returns a VC document. You p
 
 ```python
 from qwed_infra import NetworkGuard
+from qwed_infra.attestation import mint_diagnostic_attestation
 
 net = NetworkGuard()
 infra = {
@@ -223,15 +224,29 @@ infra = {
     },
 }
 
+statement = "Traffic from internet to subnet-web on port 80 is safe"
+
+# Mint an attestation bound to THIS claim + evidence (the guard computes the
+# same check internally; the token's proof_hash must match its commitment).
+diagnostic = NetworkGuard.to_diagnostic(
+    net.verify_reachability(infra, "internet", "subnet-web", 80)
+)
+attestation = mint_diagnostic_attestation(
+    diagnostic, engine="NetworkGuard", query=statement
+)
+if not attestation.is_issued:
+    # fail-closed contract: never proceed on an unissued attestation
+    raise RuntimeError(f"Attestation unavailable [{attestation.error_code}]")
+
 doc = net.to_verification_context(
     infra,                       # raw topology — the guard verifies this itself
     "internet",
     "subnet-web",
     80,
-    formal_statement="Traffic from internet to subnet-web on port 80 is safe",
-    # optional; v1.0 checks PRESENCE only (any non-empty string). Without it,
-    # VERIFIED degrades to UNVERIFIABLE. Cryptographic validation: #47.
-    attestation_token="my-release-attestation-v1",
+    formal_statement=statement,
+    # optional; without it VERIFIED degrades to UNVERIFIABLE/DENY.
+    # A forged, expired, revoked, or non-matching token BLOCKS.
+    attestation_token=attestation.token,
 )
 
 print(doc.verdict.value)          # -> VERIFIED / BLOCKED / UNVERIFIABLE
@@ -276,7 +291,7 @@ else:
 
 Store or forward `document` anywhere JSON goes — release gates, pipeline artifacts, audit logs. The `proof_ref` binds a VERIFIED decision to the exact evidence that produced it. VC evidence can contain sensitive infrastructure, policy, or cost data — apply your own access control, redaction, and retention rules when storing or forwarding documents downstream.
 
-> **Roadmap (#47):** today the attestation token is checked for **presence only**; cryptographic validation and claim binding (signature, issuer, expiry, digest binding à la `enforce_trust_decision`) land with the attestation trust boundary milestone.
+> **Attestation trust model:** attestations are self-signed by the guard process (ES256, ephemeral key) and cryptographically validated at the admission boundary — signature, issuer, expiry, revocation, plus binding to the exact claim and evidence. This is the interim stage on the path to an external witness/transparency log (ADR-005 in qwed-verification); multi-replica deployments require shared signing keys until replica-key resolution exists.
 
 ---
 
@@ -296,8 +311,9 @@ A: We use public On-Demand pricing for "Worst Case" estimation. If you have Ente
 ## 🗺️ Roadmap
 
 *   ✅ **v0.1.0:** IAM Z3 Logic, Basic Network Graph, Static Cost Catalog. (Released Jan 2025)
-*   ✅ **v0.2.0:** Fail-closed parser + IAM, NetworkGuard CIDR fix, CI fail-open removal, diagnostic port (audit.py/InfraDiagnosticResult), CostGuard Decimal/unknown types, ArtifactBoundaryGuard. (Current)
-*   🔮 **v0.3.0:** Docker/deployment artifact verification, K8s manifest support, Azure provider.
+*   ✅ **v0.2.0:** Fail-closed parser + IAM, NetworkGuard CIDR fix, CI fail-open removal, diagnostic port (audit.py/InfraDiagnosticResult), CostGuard Decimal/unknown types, ArtifactBoundaryGuard.
+*   ✅ **v0.3.0:** Verification Context v1.0 across all four guards (bridge, `to_verification_context()` adapters, conformance suite) + attestation trust boundary — ES256-signed receipts bound to the exact claim and evidence gate every ADMIT. (Current)
+*   🔮 Next: Docker/deployment artifact verification, K8s manifest support, Azure provider.
 
 ---
 

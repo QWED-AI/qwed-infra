@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-08-24
 
 ### Added
 - Verification Context v1.0 across all four guards (tracker #36) — every guard now exposes `to_verification_context()`, producing a schema-valid, tamper-evident VC document (claim, verifier identity, `sha256`-bound evidence `proof_ref`, ADMIT/DENY admission):
@@ -8,9 +8,13 @@
   - Shared bridge module `verification_context_bridge` (#37, PR #44): diagnostic → VC document conversion with fail-closed attestation policy and decision-status demotion
   - Conformance suite `tests/test_vc_conformance.py` (#42, PR #52) — bridge + all guards + document validation + malformed-input fail-closed acceptance tests
   - README: "Verification Context v1.0" section — why VC, usage examples, downstream integration guide; VC badge in the header
+- **Attestation trust boundary (#47, PR #54)** — new `qwed_infra/attestation.py`: ES256 (ECDSA P-256) JWT attestation service with ephemeral key lifecycle auditing, revocation registry, and the never-None fail-closed `AttestationResult` contract; `enforce_trust_decision()` in diagnostics.py as the single consumption-side gate validating signature/issuer/expiry/revocation plus claim bindings (status match, `query_hash == sha256(formal_statement)`, `proof_hash == diagnostic proof_ref`)
+- `mint_diagnostic_attestation()` — issues a token bound to a diagnostic's own evidence commitment
 
 ### Changed
-- **BREAKING (pre-1.0, unreleased API):** guard adapters no longer accept pre-computed result objects. `to_verification_context()` takes **raw verification inputs** and runs the guard's own deterministic solver internally (`NetworkGuard.to_verification_context(resources, source, destination, port, ...)` / `IamGuard.to_verification_context(policy, action, resource, context, ...)` / `CostGuard.to_verification_context(resources, budget_monthly, ...)` / `ArtifactBoundaryGuard.to_verification_context(package_dir, ...)`) — a result-accepting signature is forgeable (a caller could fabricate a positive result and mint ADMIT), so it was removed before any release (PRs #45/#46/#48/#50)
+- **BREAKING (pre-1.0, unreleased API):** guard adapters no longer accept pre-computed result objects. `to_verification_context()` takes **raw verification inputs** and runs the guard's own deterministic solver internally (`NetworkGuard.to_verification_context(resources, source, destination, port, ...)` / `IamGuard.to_verification_context(policy, action, resource, context=None, ...)` / `CostGuard.to_verification_context(resources, budget_monthly, ...)` / `ArtifactBoundaryGuard.to_verification_context(package_dir, ...)`) — a result-accepting signature is forgeable (a caller could fabricate a positive result and mint ADMIT), so it was removed before any release (PRs #45/#46/#48/#50)
+- **ADMISSION SEMANTICS:** `VERIFIED` results now admit **only** with a cryptographically valid attestation bound to the exact claim and evidence. Arbitrary non-empty attestation strings no longer grant ADMIT (they are rejected as forged tokens); a missing token demotes VERIFIED to UNVERIFIABLE/DENY. Callers previously passing placeholder tokens must mint via `create_verification_attestation()` / `mint_diagnostic_attestation()`
+- New runtime dependencies: `pyjwt>=2.8.0,!=2.12.1`, `cryptography>=41.0.0`
 
 ### Fixed
 - Fail-closed on malformed inputs at every VC boundary: undecimal budgets, extreme Decimal values, non-string build backends, malformed topology/policy/package inputs, symlink escapes/loops, wheel entries outside the scanned boundary — all map to BLOCKED/DENY documents instead of exceptions or guessed approval (#48, #49/PR #51, #50)
