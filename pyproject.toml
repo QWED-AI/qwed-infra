@@ -33,7 +33,7 @@ Issues = "https://github.com/QWED-AI/qwed-infra/issues"
 Changelog = "https://github.com/QWED-AI/qwed-infra/blob/main/CHANGELOG.md"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
