@@ -15,7 +15,7 @@ variable "admin_cidr_blocks" {
 variable "budget_alert_email" {
   description = "Email for cost alerts"
   type        = string
-  default     = "infra@qwedai.com"
+  default     = "support@qwedai.tech"
 }
 
 # ------------------------------------------------------------------------------

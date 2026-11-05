@@ -3,7 +3,7 @@ name = "qwed-infra"
 version = "0.3.0"
 description = "Deterministic Verification for Infrastructure as Code (IaC) using Z3 and Graph Theory."
 authors = [
-    {name = "QWED Team", email = "rahul@qwedai.com"},
+    {name = "QWED Team", email = "rahul@qwedai.tech"},
 ]
 license = {text = "Apache-2.0"}
 readme = "README.md"
@@ -26,8 +26,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://qwedai.com"
-Documentation = "https://docs.qwedai.com/infra"
+Homepage = "https://qwedai.tech"
+Documentation = "https://docs.qwedai.tech/infra"
 Repository = "https://github.com/QWED-AI/qwed-infra"
 Issues = "https://github.com/QWED-AI/qwed-infra/issues"
 Changelog = "https://github.com/QWED-AI/qwed-infra/blob/main/CHANGELOG.md"
