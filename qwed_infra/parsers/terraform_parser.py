@@ -202,6 +202,10 @@ class TerraformParser:
     # policies). An unmodelled resource matching one of these cannot be
     # recorded and skipped: its grants would be invisible to IamGuard.
     _POLICY_MARKERS = ("polic", "principal", "permission", "grant")
+    # Matched as a whole underscore-separated word only, so "acl" in
+    # aws_s3_bucket_acl or acl = "public-read" counts, but not inside a
+    # longer word.
+    _POLICY_WORDS = ("acl",)
 
     # Resource type families that grant or attach permissions even when no
     # attribute name says so (for example aws_iam_user_group_membership).
@@ -318,6 +322,8 @@ class TerraformParser:
         lowered_type = res_type.lower()
         if lowered_type.startswith(cls._POLICY_BEARING_TYPE_PREFIXES) or any(
             marker in lowered_type for marker in cls._POLICY_MARKERS
+        ) or any(
+            word in lowered_type.split("_") for word in cls._POLICY_WORDS
         ):
             raise ValueError(
                 f"{res_type}.{res_name}: resource type may grant or attach "
@@ -337,7 +343,9 @@ class TerraformParser:
         if isinstance(value, dict):
             for key, nested in value.items():
                 lowered = str(key).lower()
-                if any(marker in lowered for marker in cls._POLICY_MARKERS):
+                if any(marker in lowered for marker in cls._POLICY_MARKERS) or any(
+                    word in lowered.split("_") for word in cls._POLICY_WORDS
+                ):
                     return str(key)
                 found = cls._find_policy_key(nested)
                 if found is not None:

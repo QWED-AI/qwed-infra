@@ -489,7 +489,9 @@ class TestNormalizeResource:
 
     def test_unknown_resource_type_is_recorded(self, parser):
         """Unknown types are recorded, never dropped silently (#74)."""
-        result = parser._normalize_resource("aws_s3_bucket", "my_bucket", {"acl": "private"})
+        # An "acl" attribute (even "private") is an access setting and is
+        # refused; a bucket with none is recorded.
+        result = parser._normalize_resource("aws_s3_bucket", "my_bucket", {"bucket": "logs"})
         assert result == {
             "category": "unmodelled",
             "data": {
