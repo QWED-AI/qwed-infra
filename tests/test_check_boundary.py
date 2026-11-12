@@ -58,6 +58,17 @@ def test_dangling_source_symlink_fails_the_scan(boundary, tmp_path):
     assert boundary.main() == 1
 
 
+def test_directory_symlink_fails_the_scan(boundary, tmp_path):
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.mkdir()
+    (outside / "tool.py").write_text(SINK, encoding="utf-8")
+    try:
+        (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    assert boundary.main() == 1
+
+
 def test_unreadable_directory_fails_the_scan(boundary, tmp_path, monkeypatch):
     def failing_walk(top, onerror=None, **kwargs):
         onerror(OSError(13, "Permission denied", str(tmp_path / "locked")))

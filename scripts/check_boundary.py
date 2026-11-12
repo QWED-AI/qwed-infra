@@ -172,6 +172,11 @@ def iter_source_files(root: Path) -> list[Path]:
     for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_walk_error):
         # Prune excluded directories so their trees are never walked.
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+        # os.walk does not descend into a directory symlink, so source
+        # behind one would go unchecked. Refuse it instead.
+        for d in dirnames:
+            if (Path(dirpath) / d).is_symlink():
+                raise ScanError(f"directory symlink is not scanned: {Path(dirpath) / d}")
         for name in filenames:
             path = Path(dirpath) / name
             if path.suffix.lower() not in SCANNED_SUFFIXES:
