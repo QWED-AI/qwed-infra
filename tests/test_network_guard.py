@@ -431,8 +431,9 @@ def test_port_range_all_ports(guard):
     assert result.reachable is True
 
 
-def test_port_range_prefers_single_port(guard):
-    """Single port takes priority over from_port/to_port when both present."""
+def test_port_and_range_together_are_unverifiable(guard):
+    """A rule with both a single port and a range is contradictory: refused
+    rather than letting one form silently win (#82)."""
     infra = {
         "subnets": [{"id": "subnet-web", "security_groups": ["sg-web"]}],
         "route_tables": [
@@ -446,6 +447,6 @@ def test_port_range_prefers_single_port(guard):
             },
         },
     }
-    # port=22 matches via rule_port even though range would exclude it
     result = guard.verify_reachability(infra, source="internet", destination="subnet-web", port=22)
-    assert result.reachable is True
+    assert result.reachable is False
+    assert result.unsupported_topology is True

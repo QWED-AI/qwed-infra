@@ -127,6 +127,33 @@ def test_invalid_rule_ports_are_unverifiable(guard, rule, port):
     assert status(guard, infra(rule=rule), port=port) == "UNVERIFIABLE"
 
 
+@pytest.mark.parametrize("rule", [
+    {"port": 22, "from_port": 443, "to_port": -1, "cidr": "0.0.0.0/0"},
+    {"port": 22, "from_port": 443, "to_port": 443, "cidr": "0.0.0.0/0"},
+    {"port": 22, "to_port": 443, "cidr": "0.0.0.0/0"},
+])
+def test_mixed_port_forms_are_unverifiable(guard, rule):
+    assert status(guard, infra(rule=rule)) == "UNVERIFIABLE"
+
+
+@pytest.mark.parametrize("bad", [{"port": 22, "cidr": "not-a-cidr"}, {"port": 22}, {"port": 22, "cidr": None}])
+def test_every_rule_needs_a_valid_cidr(guard, bad):
+    resources = infra()
+    resources["security_groups"]["sg-web"]["ingress"].append(bad)
+    assert status(guard, resources) == "UNVERIFIABLE"
+
+
+def test_rule_without_any_port_field_is_unverifiable(guard):
+    assert status(guard, infra(rule={"cidr": "0.0.0.0/0"})) == "UNVERIFIABLE"
+
+
+@pytest.mark.parametrize("port", [float("inf"), 99999, "22"])
+def test_invalid_query_port_with_unsupported_topology_does_not_raise(guard, port):
+    resources = infra(rule={"port": 22, "protocol": "tcp", "cidr": "0.0.0.0/0"})
+    result = guard.verify_reachability(resources, "internet", "subnet-web", port)
+    assert NetworkGuard.to_diagnostic(result).status.value == "UNVERIFIABLE"
+
+
 @pytest.mark.parametrize("port", [99999, -1, 22.5, "22", True, float("inf")])
 def test_invalid_query_port_is_unverifiable(guard, port):
     resources = infra(rule={"port": -1, "cidr": "0.0.0.0/0"})

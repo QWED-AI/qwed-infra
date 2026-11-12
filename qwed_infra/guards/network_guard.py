@@ -181,16 +181,22 @@ class NetworkGuard:
                 if not self._rule_ports_valid(rule):
                     self._refuse("ingress rule has an invalid port specification")
                     return
+                try:
+                    ipaddress.ip_network(rule.get("cidr"), strict=False)
+                except (TypeError, ValueError):
+                    self._refuse("ingress rule has no valid cidr")
+                    return
 
     def _rule_ports_valid(self, rule: Dict[str, Any]) -> bool:
-        """A rule's port fields must be ports, and -1 must be the AWS form:
-        a single ``port`` of -1, or ``from_port`` and ``to_port`` both -1."""
-        if rule.get("port") is not None:
-            return self._normalize_port(rule["port"]) is not None
+        """A rule must use exactly one port form, ``port`` or both
+        ``from_port`` and ``to_port``, with port values; -1 must be the AWS
+        form: a single ``port`` of -1, or both range ends -1."""
         from_port = rule.get("from_port")
         to_port = rule.get("to_port")
-        if from_port is None and to_port is None:
-            return True
+        if rule.get("port") is not None:
+            if from_port is not None or to_port is not None:
+                return False
+            return self._normalize_port(rule["port"]) is not None
         if from_port is None or to_port is None:
             return False
         low = self._normalize_port(from_port)
@@ -255,17 +261,9 @@ class NetworkGuard:
         1. Routing Validation (Graph Path exists)
         2. Security Group Validation (Rules allow Ingress/Egress)
         """
-        self.build_graph(resources)
-
-        if self.has_unsupported_topology:
-            return ComputedPath(
-                reachable=False, path=[], port=port, failure_code="unsupported_topology",
-                reason=f"Topology contains unsupported constructs ({self.unsupported_reason}) — cannot verify",
-                unsupported_topology=True,
-            )
-
         # The queried port must be an int in range; rule fields may also be
-        # digit strings, but the query is typed as an int.
+        # digit strings, but the query is typed as an int. Checked first, so
+        # every return path carries a valid port.
         query_port = self._normalize_port(port) if isinstance(port, int) else None
         if query_port is None or query_port == -1:
             return ComputedPath(
@@ -274,6 +272,15 @@ class NetworkGuard:
                 unsupported_topology=True,
             )
         port = query_port
+
+        self.build_graph(resources)
+
+        if self.has_unsupported_topology:
+            return ComputedPath(
+                reachable=False, path=[], port=port, failure_code="unsupported_topology",
+                reason=f"Topology contains unsupported constructs ({self.unsupported_reason}) — cannot verify",
+                unsupported_topology=True,
+            )
 
         if source == "internet":
             try:
