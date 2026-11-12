@@ -13,6 +13,9 @@
 - TerraformParser fails closed on Terraform override files (`override.tf`, `*_override.tf`) instead of reading them as independent files (#93)
 - TerraformParser reads `.tf` files as UTF-8 on every platform (#96)
 - TerraformParser rejects HCL template directives (`%{...}`) in policy documents, and checks keys as well as values for directives and unresolved interpolation (#73)
+- IamGuard returns UNVERIFIABLE for statements that use `NotAction`, `NotResource` or `NotPrincipal`, or a `Principal` other than `*`, or that have no `Action` or `Resource`, instead of modelling them as matching nothing; a policy without `Statement` is UNVERIFIABLE, and a single-object `Statement` is accepted. TerraformParser also refuses `NotAction`, `NotResource` and `NotPrincipal` (#67)
+- IamGuard refuses policies over fixed size bounds (statements, entries, entry length, wildcards, condition entries and values, request length, request context size) as UNVERIFIABLE, builds the policy logic over the concrete request values and as flat expressions, and treats a Z3 `unknown` as UNVERIFIABLE instead of a proven denial (#76)
+- IamGuard records only the exception type for unexpected errors, so no traceback or host path reaches diagnostics or VC evidence (#87)
 
 ### Changed
 - The parsed model has a new `unmodelled` key (a list of `{"address", "reason"}` entries); `TerraformParser._normalize_resource` returns an `unmodelled` entry instead of `None` for types it does not model
