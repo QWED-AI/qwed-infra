@@ -315,16 +315,19 @@ class TerraformParser:
         }
 
     @classmethod
+    def _names_access(cls, name: str) -> bool:
+        """True if a type, attribute or block name says it carries access."""
+        lowered = name.lower()
+        if any(marker in lowered for marker in cls._POLICY_MARKERS):
+            return True
+        return any(word in lowered.split("_") for word in cls._POLICY_WORDS)
+
+    @classmethod
     def _reject_unmodelled_policy(
         cls, res_type: str, res_name: str, config: Dict[str, Any]
     ) -> None:
         """Refuse an unmodelled resource that may grant access."""
-        lowered_type = res_type.lower()
-        if lowered_type.startswith(cls._POLICY_BEARING_TYPE_PREFIXES) or any(
-            marker in lowered_type for marker in cls._POLICY_MARKERS
-        ) or any(
-            word in lowered_type.split("_") for word in cls._POLICY_WORDS
-        ):
+        if res_type.lower().startswith(cls._POLICY_BEARING_TYPE_PREFIXES) or cls._names_access(res_type):
             raise ValueError(
                 f"{res_type}.{res_name}: resource type may grant or attach "
                 f"permissions and is not modelled — its access cannot be verified."
@@ -342,15 +345,13 @@ class TerraformParser:
         names an access policy or grant."""
         if isinstance(value, dict):
             for key, nested in value.items():
-                lowered = str(key).lower()
-                if any(marker in lowered for marker in cls._POLICY_MARKERS) or any(
-                    word in lowered.split("_") for word in cls._POLICY_WORDS
-                ):
+                if cls._names_access(str(key)):
                     return str(key)
                 found = cls._find_policy_key(nested)
                 if found is not None:
                     return found
-        elif isinstance(value, list):
+            return None
+        if isinstance(value, list):
             for nested in value:
                 found = cls._find_policy_key(nested)
                 if found is not None:
