@@ -119,6 +119,9 @@ class NetworkGuard:
             if set(subnet) - self._SUBNET_KEYS:
                 self._refuse("subnet has unmodelled fields")
                 return
+            groups = subnet.get("security_groups", [])
+            if not isinstance(groups, list) or not all(isinstance(g, str) for g in groups):
+                raise TypeError("subnet security_groups must be a list of ids")
             subnet_id = subnet.get("id")
             if subnet_id in seen_subnets:
                 self._refuse(f"duplicate subnet id {subnet_id!r}")

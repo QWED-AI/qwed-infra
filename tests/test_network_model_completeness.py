@@ -195,6 +195,15 @@ def test_duplicate_subnet_ids_are_unverifiable(guard, open_first):
     assert status(guard, resources) == "UNVERIFIABLE"
 
 
+@pytest.mark.parametrize("groups", [{"sg-web": True}, "sg-web", [["sg-web"]], [1]])
+def test_subnet_security_groups_must_be_a_list_of_ids(guard, groups):
+    resources = infra()
+    resources["subnets"][0]["security_groups"] = groups
+    assert admission(guard, resources) != "ADMIT"
+    with pytest.raises(TypeError):
+        guard.verify_reachability(resources, "internet", "subnet-web", 22)
+
+
 def test_two_route_tables_for_one_subnet_are_unverifiable(guard):
     resources = infra()
     resources["route_tables"].append({"subnet_id": "subnet-web", "routes": {}})
