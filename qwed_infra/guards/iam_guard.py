@@ -3,12 +3,11 @@ IAM Policy Verification using Z3 SMT Solver.
 Provides deterministic proof of whether a policy allows/denies access.
 """
 import ipaddress
-import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-from z3 import And, InRe, Not, Or, Solver, String, StringVal, sat
+from z3 import And, InRe, Not, Or, Solver, StringVal, sat, unsat
 
 from qwed_infra.audit import (
     IAM_DENY_PRECEDENCE,
@@ -18,6 +17,35 @@ from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
 from qwed_infra.verification_context import VerificationContextDocument
 
 _IAM_CONSTRAINT_ID = "iam_guard.verify_access"
+
+
+class UnverifiablePolicyError(ValueError):
+    """Raised for a policy the guard refuses to model.
+
+    Its message is written by the guard and carries no host detail, so it
+    is safe to record in diagnostics and VC evidence. Any other exception
+    is recorded by type name only.
+    """
+
+
+# Input bounds (#76). Z3 cost grows faster than linearly in these, so a
+# hostile but well-formed policy could hold a gate worker for minutes. Each
+# bound sits well above what AWS accepts in one policy document (customer
+# managed policies are capped at 6,144 characters, the largest resource
+# policies at tens of kilobytes; ARNs at 2,048 characters). A policy over
+# any bound is UNVERIFIABLE, never allowed or denied.
+MAX_STATEMENTS = 1000
+MAX_PATTERNS_PER_ELEMENT = 1000
+MAX_PATTERNS_PER_POLICY = 2500
+MAX_PATTERN_LENGTH = 2048
+MAX_WILDCARDS_PER_PATTERN = 64
+MAX_CONDITION_ENTRIES_PER_STATEMENT = 100
+MAX_CONDITION_ENTRIES_PER_POLICY = 1000
+MAX_REQUEST_LENGTH = 2048
+
+# Statement elements the model does not represent (#67). A statement that
+# uses one is refused, never modelled as matching nothing.
+_UNMODELLED_STATEMENT_ELEMENTS = ("NotAction", "NotResource", "NotPrincipal")
 
 
 class IamPolicy(BaseModel):
@@ -181,15 +209,32 @@ class IamGuard:
     # ------------------------------------------------------------------
 
     def _build_match_list(self, z3_var, patterns: List[str]):
-        """Build a Z3 OR-expression matching a variable against a list of patterns."""
-        match_expr = False
-        for pattern in patterns:
-            constraint = True if pattern == "*" else self._match_pattern(z3_var, pattern)
-            match_expr = Or(match_expr, constraint) if match_expr is not False else constraint
-        return match_expr
+        """Build a Z3 OR-expression matching a variable against a list of patterns.
+
+        The disjunction is built flat: a left-nested chain of binary Or
+        terms grows the expression depth with the list length and can
+        overflow the native stack inside Z3.
+        """
+        constraints = [
+            True if pattern == "*" else self._match_pattern(z3_var, pattern)
+            for pattern in patterns
+        ]
+        if not constraints:
+            return False
+        if len(constraints) == 1:
+            return constraints[0]
+        return Or(*constraints)
 
     def _build_statement_condition(self, stmt: Dict, s_action, s_resource, context: Dict):
         """Build the Z3 condition for a single IAM statement."""
+        unmodelled = [e for e in _UNMODELLED_STATEMENT_ELEMENTS if e in stmt]
+        if unmodelled:
+            raise UnverifiablePolicyError(
+                f"statement uses {', '.join(unmodelled)}, which is not modelled"
+            )
+        for element in ("Action", "Resource"):
+            if element not in stmt:
+                raise UnverifiablePolicyError(f"statement has no {element}")
         p_actions = stmt.get("Action", [])
         if isinstance(p_actions, str):
             p_actions = [p_actions]
@@ -214,18 +259,106 @@ class IamGuard:
         Explicit Deny always overrides Allow, regardless of statement order.
         Pattern: And(Or(all_allows), And(Not(deny1), Not(deny2), ...))
         """
-        allow_logic = False  # Default deny: no allows yet
-        deny_logic = True    # No denies yet (vacuously true)
+        allows = []
+        denies = []
 
         for stmt in policy.get("Statement", []):
             stmt_cond = self._build_statement_condition(stmt, s_action, s_resource, context)
             if stmt.get("Effect", "Deny") == "Allow":
-                allow_logic = Or(allow_logic, stmt_cond)
+                allows.append(stmt_cond)
             else:
-                deny_logic = And(deny_logic, Not(stmt_cond))
+                denies.append(Not(stmt_cond))
+
+        # Built flat for the same reason as _build_match_list.
+        allow_logic = Or(*allows) if len(allows) > 1 else (allows[0] if allows else False)
+        deny_logic = And(*denies) if len(denies) > 1 else (denies[0] if denies else True)
 
         # Access granted only if: some Allow matches AND no Deny matches
         return And(allow_logic, deny_logic)
+
+    @staticmethod
+    def _as_pattern_list(value: Any, element: str) -> List[Any]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return value
+        raise UnverifiablePolicyError(f"{element} is not a string or a list")
+
+    @staticmethod
+    def _check_pattern_size(pattern: str, what: str) -> None:
+        if len(pattern) > MAX_PATTERN_LENGTH:
+            raise UnverifiablePolicyError(
+                f"{what} is longer than {MAX_PATTERN_LENGTH} characters"
+            )
+        if pattern.count("*") > MAX_WILDCARDS_PER_PATTERN:
+            raise UnverifiablePolicyError(
+                f"{what} has more than {MAX_WILDCARDS_PER_PATTERN} wildcards"
+            )
+
+    @classmethod
+    def _check_input_bounds(
+        cls, policy: Any, action: Any, resource: Any, context: Any
+    ) -> None:
+        """Refuse inputs whose size could stall the solver (#76)."""
+        for name, value in (("action", action), ("resource", resource)):
+            if not isinstance(value, str):
+                raise UnverifiablePolicyError(f"request {name} is not a string")
+            if len(value) > MAX_REQUEST_LENGTH:
+                raise UnverifiablePolicyError(
+                    f"request {name} is longer than {MAX_REQUEST_LENGTH} characters"
+                )
+        if not isinstance(context, dict):
+            raise UnverifiablePolicyError("request context is not a mapping")
+        if not isinstance(policy, dict):
+            raise UnverifiablePolicyError("policy is not a mapping")
+        statements = policy.get("Statement", [])
+        if not isinstance(statements, list):
+            raise UnverifiablePolicyError("Statement is not a list")
+        if len(statements) > MAX_STATEMENTS:
+            raise UnverifiablePolicyError(
+                f"policy has more than {MAX_STATEMENTS} statements"
+            )
+        total_patterns = 0
+        total_condition_entries = 0
+        for stmt in statements:
+            if not isinstance(stmt, dict):
+                raise UnverifiablePolicyError("a statement is not a mapping")
+            for element in ("Action", "Resource"):
+                patterns = cls._as_pattern_list(stmt.get(element, []), element)
+                if len(patterns) > MAX_PATTERNS_PER_ELEMENT:
+                    raise UnverifiablePolicyError(
+                        f"{element} has more than {MAX_PATTERNS_PER_ELEMENT} entries"
+                    )
+                total_patterns += len(patterns)
+                for pattern in patterns:
+                    if not isinstance(pattern, str):
+                        raise UnverifiablePolicyError(f"{element} entry is not a string")
+                    cls._check_pattern_size(pattern, f"{element} entry")
+            conditions = stmt.get("Condition", {})
+            if not isinstance(conditions, dict):
+                raise UnverifiablePolicyError("Condition is not a mapping")
+            entries = 0
+            for restrictions in conditions.values():
+                if not isinstance(restrictions, dict):
+                    raise UnverifiablePolicyError("a Condition operator block is not a mapping")
+                entries += len(restrictions)
+                for value in restrictions.values():
+                    if isinstance(value, str):
+                        # StringLike values are wildcard patterns too.
+                        cls._check_pattern_size(value, "Condition value")
+            if entries > MAX_CONDITION_ENTRIES_PER_STATEMENT:
+                raise UnverifiablePolicyError(
+                    f"statement has more than {MAX_CONDITION_ENTRIES_PER_STATEMENT} condition entries"
+                )
+            total_condition_entries += entries
+        if total_condition_entries > MAX_CONDITION_ENTRIES_PER_POLICY:
+            raise UnverifiablePolicyError(
+                f"policy has more than {MAX_CONDITION_ENTRIES_PER_POLICY} condition entries"
+            )
+        if total_patterns > MAX_PATTERNS_PER_POLICY:
+            raise UnverifiablePolicyError(
+                f"policy has more than {MAX_PATTERNS_PER_POLICY} Action and Resource entries"
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -253,9 +386,13 @@ class IamGuard:
         if context is None:
             context = {}
         try:
-            s_action = String("action")
-            s_resource = String("resource")
-            query = And(s_action == StringVal(action), s_resource == StringVal(resource))
+            self._check_input_bounds(policy, action, resource, context)
+            # The request is concrete, so the policy is built directly over
+            # the request values. Pinning free variables to the same values
+            # with an equality is equivalent but leaves Z3 far more work
+            # (minutes for a policy with a thousand patterns, see #76).
+            s_action = StringVal(action)
+            s_resource = StringVal(resource)
 
             # Collect condition metadata for audit trace
             _Z3_OPS = {"StringEquals", "StringLike"}
@@ -276,27 +413,38 @@ class IamGuard:
             policy_logic = self._build_policy_logic(policy, s_action, s_resource, context)
 
             self.solver.reset()
-            self.solver.add(query)
             self.solver.add(policy_logic)
 
-            if self.solver.check() == sat:
+            outcome = self.solver.check()
+            if outcome == sat:
                 return VerificationResult(
                     verified=True,
                     allowed=True,
                     proof="Z3 found a satisfying model (Access Allowed)",
                     condition_evaluations=condition_evaluations,
                 )
-            return VerificationResult(
-                verified=True,
-                allowed=False,
-                proof="Z3 proved unsatisfiability (Access Denied)",
-                condition_evaluations=condition_evaluations,
-            )
-        except Exception as exc:  # noqa: BLE001
+            if outcome == unsat:
+                return VerificationResult(
+                    verified=True,
+                    allowed=False,
+                    proof="Z3 proved unsatisfiability (Access Denied)",
+                    condition_evaluations=condition_evaluations,
+                )
+            # unknown: Z3 gave no answer. That is not a proof of denial.
             return VerificationResult(
                 verified=False,
                 allowed=False,
-                error=str(exc) + " " + traceback.format_exc(),
+                error="Z3 returned unknown",
+            )
+        except UnverifiablePolicyError as exc:
+            return VerificationResult(verified=False, allowed=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            # Record the exception type only: its message or a traceback can
+            # carry host paths and internals into portable VC evidence (#87).
+            return VerificationResult(
+                verified=False,
+                allowed=False,
+                error=type(exc).__name__,
             )
 
     def verify_least_privilege(self, policy: Dict[str, Any]) -> VerificationResult:

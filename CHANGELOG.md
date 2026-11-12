@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- IamGuard returns UNVERIFIABLE for statements that use `NotAction`, `NotResource` or `NotPrincipal`, or that have no `Action` or `Resource`, instead of modelling them as matching nothing (#67)
+- IamGuard refuses policies over fixed size bounds (statements, entries, entry length, wildcards, condition entries, request length) as UNVERIFIABLE, builds the policy logic over the concrete request values and as flat expressions, and treats a Z3 `unknown` as UNVERIFIABLE instead of a proven denial (#76)
+- IamGuard records only the exception type for unexpected errors, so no traceback or host path reaches diagnostics or VC evidence (#87)
+
 ## [0.3.0] - 2026-08-24
 
 ### Added
