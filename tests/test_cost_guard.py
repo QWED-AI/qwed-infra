@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 import pytest
 from qwed_infra.guards.cost_guard import CostGuard
@@ -280,6 +281,26 @@ def test_to_diagnostic_rejects_exact_figures_that_disagree(guard, field, value):
     result = guard.verify_budget(resources, budget_monthly="7.592")
     result = result.model_copy(update={field: value})
     assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
+
+
+@pytest.mark.parametrize("field", ["exact_total_monthly_cost", "exact_budget"])
+def test_to_diagnostic_huge_exact_figure_blocks_instead_of_raising(guard, field):
+    # Rounding 1e100 to cents exceeds the default Decimal precision.
+    result = guard.verify_budget({"instances": []}, budget_monthly="100")
+    result = result.model_copy(update={field: "1e100"})
+    diagnostic = CostGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "BLOCKED"
+    assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INVALID_INPUT"
+
+
+def test_verified_diagnostic_records_exact_figures_and_region(guard):
+    resources = {"instances": [{"id": "a", "instance_type": "t3.micro", "count": 1}]}
+    diagnostic = CostGuard.to_diagnostic(guard.verify_budget(resources, budget_monthly="7.595"))
+    assert diagnostic.status.value == "VERIFIED"
+    for source in (diagnostic.developer_fields, json.loads(diagnostic.proof_data)):
+        assert source["exact_total_monthly_cost"] == "7.5920"
+        assert source["exact_budget"] == "7.595"
+        assert source["pricing_region"] == "us-east-1"
 
 
 def test_to_diagnostic_rejects_exact_overrun_even_if_published_fits(guard):

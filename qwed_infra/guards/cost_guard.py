@@ -71,6 +71,10 @@ class CostGuard:
         "sc1": "0.015",
     }
 
+    # Region the whole catalogue is priced for. It is recorded in every
+    # VERIFIED diagnostic so the figure says what it was priced from.
+    PRICING_REGION = "us-east-1"
+
     # gp3 includes this baseline performance in the storage price. Anything
     # provisioned above it is billed separately and is not priced here.
     GP3_BASELINE_IOPS = 3000
@@ -274,7 +278,18 @@ class CostGuard:
             exact_budget = CostGuard._exact_or_published(
                 result.exact_budget, budget, "exact_budget"
             )
-        except ValueError:
+            # The published figures must be the conservative roundings of
+            # the exact ones, or the estimate is inconsistent. Rounding a
+            # huge value can raise, so it stays inside this guarded block.
+            has_exact = (
+                result.exact_total_monthly_cost is not None
+                or result.exact_budget is not None
+            )
+            published_consistent = not has_exact or (
+                CostGuard._display_total(exact_total) == total
+                and CostGuard._display_budget(exact_budget) == budget
+            )
+        except (ValueError, DecimalException):
             return InfraDiagnosticResult.blocked(
                 agent_message=_INVALID_INPUT_MESSAGE,
                 developer_fields={
@@ -288,16 +303,6 @@ class CostGuard:
                 },
             )
         # Re-check the decision on the exact figures, without rounding.
-        # The published figures must be the conservative roundings of the
-        # exact ones, or the estimate is inconsistent.
-        has_exact = (
-            result.exact_total_monthly_cost is not None
-            or result.exact_budget is not None
-        )
-        published_consistent = not has_exact or (
-            CostGuard._display_total(exact_total) == total
-            and CostGuard._display_budget(exact_budget) == budget
-        )
         expected_within_budget = (
             exact_total <= exact_budget
             and not result.has_unknown_types
@@ -353,6 +358,11 @@ class CostGuard:
                 },
             )
 
+        decision_figures = {
+            "exact_total_monthly_cost": decimal_text(exact_total),
+            "exact_budget": decimal_text(exact_budget),
+            "pricing_region": CostGuard.PRICING_REGION,
+        }
         trace = build_trace(COST_WITHIN_BUDGET, "ALLOWED")
         return InfraDiagnosticResult.verified(
             agent_message="Cost estimate within budget",
@@ -361,10 +371,16 @@ class CostGuard:
                 "within_budget": result.within_budget,
                 "total_monthly_cost": result.total_monthly_cost,
                 "budget": result.budget,
+                **decision_figures,
                 "reason": result.reason,
                 "audit_trace": trace,
             },
-            evidence={**trace, "total_monthly_cost": result.total_monthly_cost, "budget": result.budget},
+            evidence={
+                **trace,
+                "total_monthly_cost": result.total_monthly_cost,
+                "budget": result.budget,
+                **decision_figures,
+            },
         )
 
     def to_verification_context(
