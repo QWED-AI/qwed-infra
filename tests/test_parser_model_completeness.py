@@ -313,3 +313,29 @@ def test_aws_policy_variable_in_key_still_allowed(parser):
     doc = {"Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*",
                           "Condition": {"StringEquals": {"s3:prefix": "home/${aws:username}/"}}}]}
     assert parser._validate_statements("p", doc) == doc["Statement"]
+
+
+# ----------------------------------------------------------------------
+# Implicit root volume and tag maps
+# ----------------------------------------------------------------------
+
+def test_instance_without_root_block_device_blocks_cost(parser, tmp_path):
+    # An EBS-backed AMI creates a root volume whose size the parser cannot read.
+    write(tmp_path, "main.tf", 'resource "aws_instance" "web" {\n  ami = "ami-1"\n  instance_type = "t3.micro"\n}\n')
+    resources = parser.parse_directory(str(tmp_path))
+    assert resources["instances"][0]["id"] == "web"
+    assert [u["address"] for u in resources["unmodelled"]] == ["aws_instance.web.root_block_device"]
+    assert cost_status(resources, "1000") == "BLOCKED"
+
+
+def test_instance_with_sized_root_block_device_is_priced(parser, tmp_path):
+    write(tmp_path, "main.tf", 'resource "aws_instance" "web" {\n  instance_type = "t3.micro"\n  root_block_device {\n    volume_size = 8\n    volume_type = "gp3"\n  }\n}\n')
+    resources = parser.parse_directory(str(tmp_path))
+    assert resources["unmodelled"] == []
+    assert cost_status(resources, "1000") == "VERIFIED"
+
+
+def test_tag_keys_do_not_count_as_access(parser, tmp_path):
+    write(tmp_path, "main.tf", 'resource "aws_s3_bucket" "b" {\n  bucket = "b"\n  tags = {\n    PolicyOwner = "team"\n    grant_id = "x"\n  }\n}\n')
+    resources = parser.parse_directory(str(tmp_path))
+    assert resources["unmodelled"][0]["address"] == "aws_s3_bucket.b"

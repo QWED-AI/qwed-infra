@@ -141,6 +141,9 @@ class TerraformParser:
                     qwed_resources["volumes"].extend(
                         normalized.get("inline_volumes", [])
                     )
+                    qwed_resources["unmodelled"].extend(
+                        normalized.get("unmodelled", [])
+                    )
 
         if errors:
             raise ParseError(errors)
@@ -290,6 +293,7 @@ class TerraformParser:
                 "inline_volumes": self._inline_block_devices(
                     res_name, config, count
                 ),
+                "unmodelled": self._implicit_root_volume(res_name, config),
             }
 
         # --- Storage ---
@@ -339,12 +343,30 @@ class TerraformParser:
                 f"which may grant access — its access cannot be verified."
             )
 
+    @staticmethod
+    def _implicit_root_volume(res_name: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """An instance without root_block_device still gets a root EBS volume
+        from an EBS-backed AMI, whose size and type the parser cannot read.
+        Record it, so the cost gate does not price the instance alone."""
+        if "root_block_device" in config:
+            return []
+        return [{
+            "address": f"aws_instance.{res_name}.root_block_device",
+            "reason": "implicit root volume: size and type come from the AMI",
+        }]
+
+    # Tag maps label a resource and never grant access, so their keys are
+    # not searched for access markers.
+    _NON_ACCESS_KEYS = ("tags", "tags_all")
+
     @classmethod
     def _find_policy_key(cls, value: Any) -> Optional[str]:
         """Return the first attribute or block name, at any depth, that
         names an access policy or grant."""
         if isinstance(value, dict):
             for key, nested in value.items():
+                if str(key) in cls._NON_ACCESS_KEYS:
+                    continue
                 if cls._names_access(str(key)):
                     return str(key)
                 found = cls._find_policy_key(nested)
