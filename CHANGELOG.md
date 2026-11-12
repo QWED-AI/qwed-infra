@@ -20,6 +20,10 @@
 - NetworkGuard returns UNVERIFIABLE for ingress rules with unmodelled fields (`protocol`, `ip_protocol`, `prefix_list_id`, `source_security_group_id`, `description` and others), a one-sided `-1` port sentinel, ports that are not ASCII integers in range, a queried port that is not an int in range, duplicate subnet ids, more than one route table for a subnet, a route table without a subnet, a rule mixing `port` with a range, a reversed range, a rule without a valid `cidr`, and a subnet naming an undeclared security group; an IPv4 route no longer pairs with an IPv6-only rule (#82)
 - NetworkGuard no longer raises `OverflowError` for an infinite port; it fails closed (#88)
 - NetworkGuard treats split ranges whose union covers `0.0.0.0/0` or `::/0` (for example `0.0.0.0/1` plus `128.0.0.0/1`) as the internet, for both security group rules and routes (#94)
+- `publish.yml` publishes only for a `v...` release tag that matches the `pyproject.toml` version, runs the boundary check and the test suite before building, installs the build toolchain and the build backend from a hash-pinned requirements file and builds with `--no-isolation`, and no longer passes `skip-existing` (#84)
+- `scripts/check_boundary.py` scans `.pyw` files as well as `.py` (case-insensitive), and applies its excluded directories relative to the scan root (#97)
+- The committed `qwed_infra/__pycache__/__init__.cpython-311.pyc` is no longer tracked (#98)
+- `snyk.yml` pins the snyk CLI version, fails instead of falling back when the dev extras do not install, and grants `security-events: write` per job instead of workflow-wide (#99)
 
 ### Changed
 - The parsed model has a new `unmodelled` key (a list of `{"address", "reason"}` entries); `TerraformParser._normalize_resource` returns an `unmodelled` entry instead of `None` for types it does not model

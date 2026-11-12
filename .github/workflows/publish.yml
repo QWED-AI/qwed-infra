@@ -6,28 +6,54 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   pypi-publish:
     name: Publish release to PyPI
+    # Only a version tag (v<digit>...) may publish. The tag must also match
+    # the version in pyproject.toml, checked below.
+    # A release event runs on the release's tag ref.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
+    permissions:
+      contents: read
+      id-token: write
     steps:
     - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
     - name: Set up Python
       uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # v5.1.0
       with:
         python-version: "3.10"
-    - name: Install build dependencies
+    - name: Check the tag matches the package version
+      # GITHUB_REF_NAME is the tag name; it is read from the environment,
+      # never interpolated into the script.
+      run: |
+        python - <<'PY'
+        import os, re, sys
+        text = open("pyproject.toml", encoding="utf-8").read()
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+        tag = os.environ["GITHUB_REF_NAME"]
+        if match is None or tag != "v" + match.group(1):
+            sys.exit(f"Release tag {tag!r} does not match pyproject version "
+                     f"{match.group(1) if match else None!r}")
+        PY
+    - name: Boundary check (QWED rules)
+      run: python scripts/check_boundary.py
+    - name: Run the test suite
       run: |
         python -m pip install --upgrade pip
-        pip install build
+        pip install -e ".[dev]"
+        python -m pytest tests/ -q
+    - name: Install build toolchain (hash-pinned)
+      run: |
+        pip install --require-hashes --only-binary=:all: -r .github/requirements/publish-build.txt
     - name: Build package
-      run: python -m build
+      # --no-isolation builds with the hash-pinned backend installed above
+      # instead of installing build requirements unhashed.
+      run: python -m build --no-isolation
     - name: Publish package distributions to PyPI
       # v1.14.2 (twine >= 7): the older release/v1 pin ships twine < 7,
       # which rejects Metadata-Version 2.5 emitted by floating hatchling.
+      # No skip-existing: uploading a version that already exists must fail.
       uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-      with:
-        skip-existing: true

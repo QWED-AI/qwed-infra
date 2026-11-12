@@ -6,12 +6,19 @@ This is a release gate, not a replacement for proper security review.
 """
 
 import ast
+import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_ROOT = REPO_ROOT
 EXCLUDED_DIRS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
+
+# Python source the interpreter will import or run. ``.pyw`` is ordinary
+# Python (Windows runs it without a console). ``.pyi`` stubs are not
+# executed by the import system, so they are not scanned. Suffixes are
+# compared case-insensitively, as Windows imports ``X.PY`` too.
+SCANNED_SUFFIXES = {".py", ".pyw"}
 
 # Full call names that are forbidden (dotted names)
 FORBIDDEN_CALLS = {
@@ -146,6 +153,40 @@ def check_file(filepath: Path) -> list[str]:
     return errors
 
 
+class ScanError(Exception):
+    """A path the scan should cover could not be read."""
+
+
+def _raise_walk_error(error: OSError) -> None:
+    raise ScanError(f"cannot read directory {error.filename}: {error.strerror}")
+
+
+def iter_source_files(root: Path) -> list[Path]:
+    """Return every scanned source file under root, outside EXCLUDED_DIRS.
+
+    Raises ScanError for an unreadable directory or a source-named path that
+    is not a readable file (such as a dangling symlink), so nothing the scan
+    should cover is skipped silently.
+    """
+    files = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_walk_error):
+        # Prune excluded directories so their trees are never walked.
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+        # os.walk does not descend into a directory symlink, so source
+        # behind one would go unchecked. Refuse it instead.
+        for d in dirnames:
+            if (Path(dirpath) / d).is_symlink():
+                raise ScanError(f"directory symlink is not scanned: {Path(dirpath) / d}")
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.suffix.lower() not in SCANNED_SUFFIXES:
+                continue
+            if not path.is_file():
+                raise ScanError(f"cannot read source file {path}")
+            files.append(path)
+    return sorted(files)
+
+
 def main() -> int:
     errors: list[str] = []
 
@@ -154,9 +195,13 @@ def main() -> int:
         print(f"  [CONFIG_ERROR] Scan root not found or not a directory: {SCAN_ROOT}")
         return 1
 
-    for pyfile in sorted(SCAN_ROOT.rglob("*.py")):
-        if any(part in EXCLUDED_DIRS for part in pyfile.parts):
-            continue
+    try:
+        source_files = iter_source_files(SCAN_ROOT)
+    except ScanError as exc:
+        print(" QWED-Infra Boundary check FAILED")
+        print(f"  [SCAN_ERROR] {exc}")
+        return 1
+    for pyfile in source_files:
         errors.extend(check_file(pyfile))
 
     if errors:
