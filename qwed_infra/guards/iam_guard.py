@@ -27,6 +27,10 @@ class UnverifiablePolicyError(ValueError):
     is recorded by type name only.
     """
 
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
 
 # Input bounds (#76). Z3 cost grows faster than linearly in these, so a
 # hostile but well-formed policy could hold a gate worker for minutes. Each
@@ -42,6 +46,8 @@ MAX_WILDCARDS_PER_PATTERN = 64
 MAX_CONDITION_ENTRIES_PER_STATEMENT = 100
 MAX_CONDITION_ENTRIES_PER_POLICY = 1000
 MAX_REQUEST_LENGTH = 2048
+MAX_CONTEXT_ENTRIES = 100
+MAX_LIST_VALUE_ENTRIES = 100
 
 # Statement elements the model does not represent (#67). A statement that
 # uses one is refused, never modelled as matching nothing.
@@ -296,6 +302,31 @@ class IamGuard:
             )
 
     @classmethod
+    def _check_value_size(cls, value: Any, what: str, pattern: bool = False) -> None:
+        """Bound a string, or each string in a list, used as a condition key,
+        condition value or context value. Other scalars are left to the
+        evaluator."""
+        if isinstance(value, list):
+            if len(value) > MAX_LIST_VALUE_ENTRIES:
+                raise UnverifiablePolicyError(
+                    f"{what} list has more than {MAX_LIST_VALUE_ENTRIES} entries"
+                )
+            for item in value:
+                if isinstance(item, (list, dict)):
+                    raise UnverifiablePolicyError(f"{what} list holds a nested container")
+                cls._check_value_size(item, what, pattern)
+            return
+        if isinstance(value, dict):
+            raise UnverifiablePolicyError(f"{what} is a mapping")
+        if isinstance(value, str):
+            if pattern:
+                cls._check_pattern_size(value, what)
+            elif len(value) > MAX_REQUEST_LENGTH:
+                raise UnverifiablePolicyError(
+                    f"{what} is longer than {MAX_REQUEST_LENGTH} characters"
+                )
+
+    @classmethod
     def _check_input_bounds(
         cls, policy: Any, action: Any, resource: Any, context: Any
     ) -> None:
@@ -309,6 +340,13 @@ class IamGuard:
                 )
         if not isinstance(context, dict):
             raise UnverifiablePolicyError("request context is not a mapping")
+        if len(context) > MAX_CONTEXT_ENTRIES:
+            raise UnverifiablePolicyError(
+                f"request context has more than {MAX_CONTEXT_ENTRIES} entries"
+            )
+        for key, value in context.items():
+            cls._check_value_size(key, "request context key")
+            cls._check_value_size(value, "request context value")
         if not isinstance(policy, dict):
             raise UnverifiablePolicyError("policy is not a mapping")
         statements = policy.get("Statement", [])
@@ -342,10 +380,11 @@ class IamGuard:
                 if not isinstance(restrictions, dict):
                     raise UnverifiablePolicyError("a Condition operator block is not a mapping")
                 entries += len(restrictions)
-                for value in restrictions.values():
-                    if isinstance(value, str):
-                        # StringLike values are wildcard patterns too.
-                        cls._check_pattern_size(value, "Condition value")
+                for key, value in restrictions.items():
+                    cls._check_value_size(key, "Condition key")
+                    # StringLike values are wildcard patterns, so the
+                    # wildcard bound applies to them too.
+                    cls._check_value_size(value, "Condition value", pattern=True)
             if entries > MAX_CONDITION_ENTRIES_PER_STATEMENT:
                 raise UnverifiablePolicyError(
                     f"statement has more than {MAX_CONDITION_ENTRIES_PER_STATEMENT} condition entries"
@@ -437,7 +476,7 @@ class IamGuard:
                 error="Z3 returned unknown",
             )
         except UnverifiablePolicyError as exc:
-            return VerificationResult(verified=False, allowed=False, error=str(exc))
+            return VerificationResult(verified=False, allowed=False, error=exc.reason)
         except Exception as exc:  # noqa: BLE001
             # Record the exception type only: its message or a traceback can
             # carry host paths and internals into portable VC evidence (#87).

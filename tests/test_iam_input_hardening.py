@@ -132,6 +132,44 @@ def test_over_bound_inputs_are_unverifiable(guard, policy, request_):
     assert_unverifiable(result)
 
 
+@pytest.mark.parametrize("context", [
+    {"aws:userid": "a" * (iam_module.MAX_REQUEST_LENGTH + 1)},
+    {"k" * (iam_module.MAX_REQUEST_LENGTH + 1): "v"},
+    {f"k{i}": "v" for i in range(iam_module.MAX_CONTEXT_ENTRIES + 1)},
+    {"aws:TagKeys": ["t"] * (iam_module.MAX_LIST_VALUE_ENTRIES + 1)},
+    {"aws:TagKeys": ["a" * (iam_module.MAX_REQUEST_LENGTH + 1)]},
+    {"aws:TagKeys": [["nested"]]},
+    {"aws:userid": {"nested": "mapping"}},
+])
+def test_over_bound_context_is_unverifiable(guard, context):
+    result = guard.verify_access({"Statement": [ALLOW_ALL]}, "s3:GetObject", "*", context)
+    assert_unverifiable(result)
+
+
+@pytest.mark.parametrize("value", [
+    ["10.0.0.0/8"] * (iam_module.MAX_LIST_VALUE_ENTRIES + 1),
+    ["a" * (iam_module.MAX_PATTERN_LENGTH + 1)],
+    ["a*" * (iam_module.MAX_WILDCARDS_PER_PATTERN + 1)],
+    {"nested": "mapping"},
+])
+def test_over_bound_list_condition_value_is_unverifiable(guard, value):
+    policy = {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*",
+                             "Condition": {"StringLike": {"aws:userid": value}}}]}
+    start = time.monotonic()
+    result = guard.verify_access(policy, "s3:GetObject", "*", {"aws:userid": "x"})
+    assert time.monotonic() - start < 5
+    assert_unverifiable(result)
+
+
+def test_context_within_bounds_still_evaluates(guard):
+    policy = {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*",
+                             "Condition": {"StringEquals": {"aws:userid": "alice"}}}]}
+    context = {"aws:userid": "alice", "aws:TagKeys": ["a", "b"], "aws:MultiFactorAuthAge": 30}
+    result = guard.verify_access(policy, "s3:GetObject", "*", context)
+    assert result.verified is True
+    assert result.allowed is True
+
+
 def test_bounds_are_inclusive(guard):
     pattern = "s3:" + "a" * (iam_module.MAX_PATTERN_LENGTH - 4) + "*"
     assert len(pattern) == iam_module.MAX_PATTERN_LENGTH
