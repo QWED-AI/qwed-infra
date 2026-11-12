@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
-- IamGuard returns UNVERIFIABLE for statements that use `NotAction`, `NotResource` or `NotPrincipal`, or a `Principal` other than `*`, or that have no `Action` or `Resource`, instead of modelling them as matching nothing; a policy without `Statement` is UNVERIFIABLE, and a single-object `Statement` is accepted (#67)
+- IamGuard returns UNVERIFIABLE for statements that use `NotAction`, `NotResource` or `NotPrincipal`, or a `Principal` other than `*`, or that have no `Action` or `Resource`, instead of modelling them as matching nothing; a policy without `Statement` is UNVERIFIABLE, and a single-object `Statement` is accepted. TerraformParser also refuses `NotAction`, `NotResource` and `NotPrincipal` (#67)
 - IamGuard refuses policies over fixed size bounds (statements, entries, entry length, wildcards, condition entries and values, request length, request context size) as UNVERIFIABLE, builds the policy logic over the concrete request values and as flat expressions, and treats a Z3 `unknown` as UNVERIFIABLE instead of a proven denial (#76)
 - IamGuard records only the exception type for unexpected errors, so no traceback or host path reaches diagnostics or VC evidence (#87)
 

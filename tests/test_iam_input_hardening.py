@@ -104,6 +104,15 @@ def test_single_object_statement_is_accepted(guard):
     assert policy == {"Statement": deny}
 
 
+@pytest.mark.parametrize("element", ["NotAction", "NotResource", "NotPrincipal"])
+def test_parser_refuses_unmodelled_statement_elements(element):
+    from qwed_infra.parsers.terraform_parser import TerraformParser
+
+    statement = {"Effect": "Allow", "Action": "*", "Resource": "*", element: "iam:*"}
+    with pytest.raises(ValueError, match="not modelled"):
+        TerraformParser._validate_statements("p", {"Statement": [statement]})
+
+
 def test_vc_document_for_notaction_is_not_admitted(guard):
     policy = {"Statement": [{"Effect": "Allow", "NotAction": "iam:*", "Resource": "*"}]}
     doc = guard.to_verification_context(

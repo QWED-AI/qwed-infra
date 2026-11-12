@@ -247,6 +247,16 @@ class TerraformParser:
                     f"{type(statement).__name__}, not a dict — cannot extract."
                 )
             TerraformParser._reject_unresolved_interpolation(res_name, statement)
+            unmodelled = [
+                e for e in ("NotAction", "NotResource", "NotPrincipal") if e in statement
+            ]
+            if unmodelled:
+                # Same refusal as IamGuard: these elements are not modelled,
+                # so the statement cannot be verified (#67).
+                raise ValueError(
+                    f"aws_iam_policy '{res_name}': Statement[{index}] uses "
+                    f"{', '.join(unmodelled)}, which is not modelled — cannot verify."
+                )
         return statements
 
     @staticmethod
