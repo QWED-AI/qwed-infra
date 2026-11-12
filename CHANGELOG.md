@@ -3,9 +3,16 @@
 ## [Unreleased]
 
 ### Fixed
+- CostGuard keeps instance prices and EBS storage prices in separate tables, so a storage price key used as an instance type is an unknown instance type and blocks (#104)
+- CostGuard prices gp2 at $0.10 and gp3 at $0.08 per GB-month (us-east-1 list price); st1 and sc1 now use their list prices too. `standard` (magnetic) volumes are no longer priced and fail closed, because their per-I/O-request charge cannot be known before deployment (#102)
+- CostGuard compares the exact total with the exact budget, so a sub-cent overrun is no longer certified. The published total is rounded up to the cent and the budget down; the exact figures are kept in the new `exact_total_monthly_cost` and `exact_budget` fields, which `to_diagnostic` re-checks and records, with `pricing_region` and `pricing_catalogue_sha256` (a content hash of the price tables), in the developer fields and proof evidence of a VERIFIED diagnostic (#75, #102)
+- CostGuard multiplies volume cost by `count` and fails closed on provisioned IOPS or throughput it cannot price (gp3 above its 3000 IOPS / 125 MiB/s baseline, or on any other volume type) (#92)
 - IamGuard returns UNVERIFIABLE for statements that use `NotAction`, `NotResource` or `NotPrincipal`, or a `Principal` other than `*`, or that have no `Action` or `Resource`, instead of modelling them as matching nothing; a policy without `Statement` is UNVERIFIABLE, and a single-object `Statement` is accepted. TerraformParser also refuses `NotAction`, `NotResource` and `NotPrincipal` (#67)
 - IamGuard refuses policies over fixed size bounds (statements, entries, entry length, wildcards, condition entries and values, request length, request context size) as UNVERIFIABLE, builds the policy logic over the concrete request values and as flat expressions, and treats a Z3 `unknown` as UNVERIFIABLE instead of a proven denial (#76)
 - IamGuard records only the exception type for unexpected errors, so no traceback or host path reaches diagnostics or VC evidence (#87)
+
+### Changed
+- `CostGuard.PRICING_CATALOG` is replaced by `INSTANCE_PRICING` (USD per instance-hour) and `VOLUME_PRICING` (USD per GB-month, keyed by volume type)
 
 ## [0.3.0] - 2026-08-24
 
