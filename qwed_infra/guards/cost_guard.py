@@ -34,6 +34,8 @@ class CostEstimate(BaseModel):
     # than a cent. None for estimates built by hand.
     exact_total_monthly_cost: Optional[str] = None
     exact_budget: Optional[str] = None
+    # Content hash of the price catalogue the estimate was computed with.
+    pricing_catalogue_sha256: Optional[str] = None
 
 
 class CostGuard:
@@ -284,6 +286,7 @@ class CostGuard:
             has_unknown_types=has_unknown,
             exact_total_monthly_cost=decimal_text(total_monthly),
             exact_budget=decimal_text(budget),
+            pricing_catalogue_sha256=self.pricing_catalogue_sha256(),
         )
 
     @staticmethod
@@ -320,10 +323,15 @@ class CostGuard:
                 },
             )
         # Re-check the decision on the exact figures, without rounding.
+        # An estimate must name the catalogue it was priced with, and that
+        # must still be the catalogue in force: an estimate from other
+        # prices cannot be certified against these ones.
+        catalogue_id = result.pricing_catalogue_sha256 or CostGuard.pricing_catalogue_sha256()
         expected_within_budget = (
             exact_total <= exact_budget
             and not result.has_unknown_types
             and published_consistent
+            and catalogue_id == CostGuard.pricing_catalogue_sha256()
         )
         if result.within_budget != expected_within_budget:
             trace_rule = (
@@ -379,7 +387,7 @@ class CostGuard:
             "exact_total_monthly_cost": decimal_text(exact_total),
             "exact_budget": decimal_text(exact_budget),
             "pricing_region": CostGuard.PRICING_REGION,
-            "pricing_catalogue_sha256": CostGuard.pricing_catalogue_sha256(),
+            "pricing_catalogue_sha256": catalogue_id,
         }
         trace = build_trace(COST_WITHIN_BUDGET, "ALLOWED")
         return InfraDiagnosticResult.verified(

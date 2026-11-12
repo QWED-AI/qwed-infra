@@ -321,6 +321,17 @@ def test_verified_diagnostic_records_exact_figures_and_region(guard):
         assert source["pricing_catalogue_sha256"] == CostGuard.pricing_catalogue_sha256()
 
 
+def test_estimate_keeps_the_catalogue_it_was_priced_with(guard, monkeypatch):
+    resources = {"volumes": [{"id": "v", "volume_type": "gp3", "size_gb": 1000}]}
+    result = guard.verify_budget(resources, budget_monthly="100")
+    assert result.pricing_catalogue_sha256 == CostGuard.pricing_catalogue_sha256()
+    # The catalogue changes after the estimate was made: it is not certified.
+    monkeypatch.setitem(CostGuard.VOLUME_PRICING, "gp3", "0.081")
+    diagnostic = CostGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "BLOCKED"
+    assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INCONSISTENT"
+
+
 def test_catalogue_identifier_changes_with_any_price(guard, monkeypatch):
     before = CostGuard.pricing_catalogue_sha256()
     assert len(before) == 64
