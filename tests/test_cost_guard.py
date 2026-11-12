@@ -278,7 +278,7 @@ def test_sub_cent_margin_within_budget_is_verified(guard, budget):
 def test_to_diagnostic_rejects_exact_figures_that_disagree(guard, field, value):
     resources = {"instances": [{"id": "a", "instance_type": "t3.micro", "count": 1}]}
     result = guard.verify_budget(resources, budget_monthly="7.592")
-    setattr(result, field, value)
+    result = result.model_copy(update={field: value})
     assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
 
 
