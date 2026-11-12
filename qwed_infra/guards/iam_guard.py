@@ -320,6 +320,16 @@ class IamGuard:
                 f"{what} has more than {MAX_WILDCARDS_PER_PATTERN} wildcards"
             )
 
+    @staticmethod
+    def _check_key(key: Any, what: str) -> None:
+        """Policy documents are JSON, so every key is a string."""
+        if not isinstance(key, str):
+            raise UnverifiablePolicyError(f"{what} is not a string")
+        if len(key) > MAX_REQUEST_LENGTH:
+            raise UnverifiablePolicyError(
+                f"{what} is longer than {MAX_REQUEST_LENGTH} characters"
+            )
+
     @classmethod
     def _check_value_size(cls, value: Any, what: str, pattern: bool = False) -> None:
         """Bound a string, or each string in a list, used as a condition key,
@@ -364,7 +374,7 @@ class IamGuard:
                 f"request context has more than {MAX_CONTEXT_ENTRIES} entries"
             )
         for key, value in context.items():
-            cls._check_value_size(key, "request context key")
+            cls._check_key(key, "request context key")
             cls._check_value_size(value, "request context value")
         if not isinstance(policy, dict):
             raise UnverifiablePolicyError("policy is not a mapping")
@@ -395,12 +405,13 @@ class IamGuard:
             if not isinstance(conditions, dict):
                 raise UnverifiablePolicyError("Condition is not a mapping")
             entries = 0
-            for restrictions in conditions.values():
+            for operator, restrictions in conditions.items():
+                cls._check_key(operator, "Condition operator")
                 if not isinstance(restrictions, dict):
                     raise UnverifiablePolicyError("a Condition operator block is not a mapping")
                 entries += len(restrictions)
                 for key, value in restrictions.items():
-                    cls._check_value_size(key, "Condition key")
+                    cls._check_key(key, "Condition key")
                     # StringLike values are wildcard patterns, so the
                     # wildcard bound applies to them too.
                     cls._check_value_size(value, "Condition value", pattern=True)

@@ -201,6 +201,17 @@ def test_over_bound_list_condition_value_is_unverifiable(guard, value):
     assert_unverifiable(result)
 
 
+@pytest.mark.parametrize("condition,context", [
+    ({"StringEquals": {1: "alice"}}, {1: "alice"}),
+    ({"StringEquals": {"aws:userid": "alice"}}, {1: "alice", "aws:userid": "alice"}),
+    ({1: {"aws:userid": "alice"}}, {"aws:userid": "alice"}),
+    ({"S" * (iam_module.MAX_REQUEST_LENGTH + 1): {"aws:userid": "alice"}}, {"aws:userid": "alice"}),
+])
+def test_non_string_or_oversized_keys_are_unverifiable(guard, condition, context):
+    policy = {"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*", "Condition": condition}]}
+    assert_unverifiable(guard.verify_access(policy, "s3:GetObject", "*", context))
+
+
 def test_context_within_bounds_still_evaluates(guard):
     policy = {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*",
                              "Condition": {"StringEquals": {"aws:userid": "alice"}}}]}
