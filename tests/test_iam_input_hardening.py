@@ -68,6 +68,42 @@ def test_statement_missing_action_or_resource_is_unverifiable(guard, statement):
     assert "has no" in result.error
 
 
+@pytest.mark.parametrize("principal", [
+    {"AWS": "arn:aws:iam::111122223333:root"},
+    {"Service": "lambda.amazonaws.com"},
+    "arn:aws:iam::111122223333:root",
+    {"AWS": ["*", "arn:aws:iam::1:root"]},
+])
+def test_restricted_principal_is_unverifiable(guard, principal):
+    statement = {"Effect": "Allow", "Principal": principal, "Action": "s3:GetObject", "Resource": "*"}
+    assert_unverifiable(guard.verify_access({"Statement": [statement]}, "s3:GetObject", "arn:aws:s3:::b/k"))
+
+
+@pytest.mark.parametrize("principal", ["*", {"AWS": "*"}])
+def test_unrestricted_principal_is_modelled(guard, principal):
+    statement = {"Effect": "Allow", "Principal": principal, "Action": "s3:GetObject", "Resource": "*"}
+    result = guard.verify_access({"Statement": [statement]}, "s3:GetObject", "arn:aws:s3:::b/k")
+    assert result.verified is True
+    assert result.allowed is True
+
+
+@pytest.mark.parametrize("policy", [{}, {"Version": "2012-10-17"}])
+def test_policy_without_statement_is_unverifiable(guard, policy):
+    assert_unverifiable(guard.verify_access(policy, "s3:GetObject", "*"))
+
+
+def test_single_object_statement_is_accepted(guard):
+    deny = {"Effect": "Deny", "Action": "s3:GetObject", "Resource": "*"}
+    policy = {"Statement": deny}
+    result = guard.verify_access(policy, "s3:GetObject", "arn:aws:s3:::b/k")
+    assert result.verified is True
+    assert result.allowed is False
+    allow = guard.verify_access({"Statement": ALLOW_ALL}, "s3:GetObject", "arn:aws:s3:::b/k")
+    assert allow.verified is True
+    assert allow.allowed is True
+    assert policy == {"Statement": deny}
+
+
 def test_vc_document_for_notaction_is_not_admitted(guard):
     policy = {"Statement": [{"Effect": "Allow", "NotAction": "iam:*", "Resource": "*"}]}
     doc = guard.to_verification_context(
@@ -103,8 +139,12 @@ def test_many_statements_keep_deny_precedence(guard):
     denies = [{"Effect": "Deny", "Action": f"s3:Put{i}*", "Resource": "*"} for i in range(998)]
     denies.append({"Effect": "Deny", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*"})
     policy = {"Statement": [ALLOW_ALL, *denies]}
-    assert guard.verify_access(policy, "s3:GetObject", "arn:aws:s3:::b/k").allowed is False
-    assert guard.verify_access(policy, "s3:GetObject", "arn:aws:s3:::c/k").allowed is True
+    denied = guard.verify_access(policy, "s3:GetObject", "arn:aws:s3:::b/k")
+    assert denied.verified is True
+    assert denied.allowed is False
+    allowed = guard.verify_access(policy, "s3:GetObject", "arn:aws:s3:::c/k")
+    assert allowed.verified is True
+    assert allowed.allowed is True
 
 
 @pytest.mark.parametrize("policy,request_", [

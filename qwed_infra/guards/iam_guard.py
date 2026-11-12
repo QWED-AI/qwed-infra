@@ -241,6 +241,12 @@ class IamGuard:
         for element in ("Action", "Resource"):
             if element not in stmt:
                 raise UnverifiablePolicyError(f"statement has no {element}")
+        # The request carries no principal, so the model is principal
+        # agnostic. That is exact only for a Principal that names everyone.
+        if "Principal" in stmt and stmt["Principal"] not in ("*", {"AWS": "*"}):
+            raise UnverifiablePolicyError(
+                "statement restricts Principal, which is not modelled"
+            )
         p_actions = stmt.get("Action", [])
         if isinstance(p_actions, str):
             p_actions = [p_actions]
@@ -281,6 +287,19 @@ class IamGuard:
 
         # Access granted only if: some Allow matches AND no Deny matches
         return And(allow_logic, deny_logic)
+
+    @staticmethod
+    def _normalize_statement_list(policy: Any) -> Any:
+        """Require a Statement element, and accept AWS's single-object form
+        by wrapping it in a list (on a copy; the caller's policy is not
+        changed)."""
+        if not isinstance(policy, dict):
+            raise UnverifiablePolicyError("policy is not a mapping")
+        if "Statement" not in policy:
+            raise UnverifiablePolicyError("policy has no Statement")
+        if isinstance(policy["Statement"], dict):
+            return {**policy, "Statement": [policy["Statement"]]}
+        return policy
 
     @staticmethod
     def _as_pattern_list(value: Any, element: str) -> List[Any]:
@@ -425,6 +444,7 @@ class IamGuard:
         if context is None:
             context = {}
         try:
+            policy = self._normalize_statement_list(policy)
             self._check_input_bounds(policy, action, resource, context)
             # The request is concrete, so the policy is built directly over
             # the request values. Pinning free variables to the same values
