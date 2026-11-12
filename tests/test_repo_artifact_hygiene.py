@@ -42,6 +42,7 @@ def test_no_bytecode_is_tracked():
     index = git_index_bytes()
     assert b"__pycache__/" not in index
     assert b".pyc\x00" not in index
+    assert b".pyo\x00" not in index
 
 
 def test_guard_admits_the_package_source(tmp_path):
