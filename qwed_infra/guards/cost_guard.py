@@ -138,12 +138,15 @@ class CostGuard:
         budget_monthly: Decimal,
         unknown_instance_types: list,
         unknown_volume_types: list,
+        unmodelled_declarations: Optional[list] = None,
     ) -> tuple:
         parts = []
         if unknown_instance_types:
-            parts.append(f"unknown instance types: {sorted(set(unknown_instance_types))}")
+            parts.append(f"unknown instance types: {sorted(set(map(str, unknown_instance_types)))}")
         if unknown_volume_types:
-            parts.append(f"unknown volume types: {sorted(set(unknown_volume_types))}")
+            parts.append(f"unknown volume types: {sorted(set(map(str, unknown_volume_types)))}")
+        if unmodelled_declarations:
+            parts.append(f"unmodelled declarations: {sorted(set(unmodelled_declarations))}")
         total_q = CostGuard._display_total(total_monthly)
         budget_q = CostGuard._display_budget(budget_monthly)
         if parts:
@@ -259,6 +262,25 @@ class CostGuard:
         breakdown[key] = decimal_text(monthly)
         return monthly
 
+    def _unmodelled_declarations(self, resources: Dict[str, Any], breakdown: dict) -> list:
+        """Read the parser's record of declarations it did not model.
+
+        Any entry means the estimate does not cover the whole plan, so the
+        budget cannot be certified. A record that is not a list is itself
+        treated as one unmodelled declaration.
+        """
+        record = resources.get("unmodelled", [])
+        if not isinstance(record, list):
+            record = [{"address": "<malformed unmodelled record>"}]
+        addresses = []
+        for entry in record:
+            address = entry.get("address") if isinstance(entry, dict) else None
+            address = str(address) if address else "<unnamed>"
+            key = self._unique_key(breakdown, f"unmodelled-{address}")
+            breakdown[key] = decimal_text(Decimal("0.00"))
+            addresses.append(address)
+        return addresses
+
     def verify_budget(self, resources: Dict[str, Any], budget_monthly: object) -> CostEstimate:
         budget = parse_decimal_input(budget_monthly, "budget_monthly")
         total_monthly = Decimal("0")
@@ -270,11 +292,20 @@ class CostGuard:
             total_monthly += self._process_instance(inst, breakdown, unknown_instance_types)
         for vol in resources.get("volumes", []):
             total_monthly += self._process_volume(vol, breakdown, unknown_volume_types)
+        unmodelled_declarations = self._unmodelled_declarations(resources, breakdown)
 
         total_q = self._display_total(total_monthly)
-        has_unknown = bool(unknown_instance_types) or bool(unknown_volume_types)
+        has_unknown = (
+            bool(unknown_instance_types)
+            or bool(unknown_volume_types)
+            or bool(unmodelled_declarations)
+        )
         reason, within_budget = self._build_reason(
-            total_monthly, budget, unknown_instance_types, unknown_volume_types
+            total_monthly,
+            budget,
+            unknown_instance_types,
+            unknown_volume_types,
+            unmodelled_declarations,
         )
 
         return CostEstimate(
