@@ -7,12 +7,19 @@
 - CostGuard prices gp2 at $0.10 and gp3 at $0.08 per GB-month (us-east-1 list price); st1 and sc1 now use their list prices too. `standard` (magnetic) volumes are no longer priced and fail closed, because their per-I/O-request charge cannot be known before deployment (#102)
 - CostGuard compares the exact total with the exact budget, so a sub-cent overrun is no longer certified. The published total is rounded up to the cent and the budget down; the exact figures are kept in the new `exact_total_monthly_cost` and `exact_budget` fields, which `to_diagnostic` re-checks and records, with `pricing_region` and `pricing_catalogue_sha256` (a content hash of the price tables), in the developer fields and proof evidence of a VERIFIED diagnostic (#75, #102)
 - CostGuard multiplies volume cost by `count` and fails closed on provisioned IOPS or throughput it cannot price (gp3 above its 3000 IOPS / 125 MiB/s baseline, or on any other volume type) (#92)
+- TerraformParser records every declaration it does not model in a new `unmodelled` list on the model instead of dropping it; CostGuard blocks while that list is non-empty. Unmodelled resources that may grant access (`aws_iam_*` types, and any type, attribute or block whose name contains `polic`, `principal`, `permission`, `grant` or `authoriz`, or has `acl` or `roles` as a word; `tags` maps are not searched) raise `ParseError` (#74)
+- TerraformParser fails closed on a missing directory, a directory with no `.tf` files, `.tf.json` files and module calls; `for_each` and `dynamic` on instances and volumes are recorded as unmodelled; `aws_ebs_volume` without `size` is no longer defaulted to 10 GB (#75)
+- TerraformParser carries `count`, `iops` and `throughput` on `aws_ebs_volume`, and models `root_block_device` and `ebs_block_device` on `aws_instance` as volumes; an instance without `root_block_device` records its implicit root volume as unmodelled, because its size comes from the AMI (#92)
+- TerraformParser fails closed on Terraform override files (`override.tf`, `*_override.tf`) instead of reading them as independent files (#93)
+- TerraformParser reads `.tf` files as UTF-8 on every platform (#96)
+- TerraformParser rejects HCL template directives (`%{...}`) in policy documents, and checks keys as well as values for directives and unresolved interpolation (#73)
 - NetworkGuard models an explicit set of keys and route targets and returns UNVERIFIABLE for anything else, instead of refusing only a list of known spellings (#81)
 - NetworkGuard returns UNVERIFIABLE for ingress rules with unmodelled fields (`protocol`, `ip_protocol`, `prefix_list_id`, `source_security_group_id`, `description` and others), a one-sided `-1` port sentinel, ports that are not ASCII integers in range, a queried port that is not an int in range, duplicate subnet ids, more than one route table for a subnet, a route table without a subnet, a rule mixing `port` with a range, a reversed range, a rule without a valid `cidr`, and a subnet naming an undeclared security group; an IPv4 route no longer pairs with an IPv6-only rule (#82)
 - NetworkGuard no longer raises `OverflowError` for an infinite port; it fails closed (#88)
 - NetworkGuard treats split ranges whose union covers `0.0.0.0/0` or `::/0` (for example `0.0.0.0/1` plus `128.0.0.0/1`) as the internet, for both security group rules and routes (#94)
 
 ### Changed
+- The parsed model has a new `unmodelled` key (a list of `{"address", "reason"}` entries); `TerraformParser._normalize_resource` returns an `unmodelled` entry instead of `None` for types it does not model
 - `CostGuard.PRICING_CATALOG` is replaced by `INSTANCE_PRICING` (USD per instance-hour) and `VOLUME_PRICING` (USD per GB-month, keyed by volume type)
 
 ## [0.3.0] - 2026-08-24
