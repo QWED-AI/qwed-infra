@@ -30,7 +30,12 @@ def git_index_bytes() -> bytes:
         # A split index keeps unchanged entries in a shared file; this
         # reader does not merge them, so it cannot vouch for the result.
         pytest.skip("split git index is not supported by this check")
-    return index.read_bytes()
+    data = index.read_bytes()
+    # Versions 2 and 3 store every path in full. Version 4 compresses each
+    # path against the previous one, so a byte search could miss a path.
+    if data[:4] != b"DIRC" or int.from_bytes(data[4:8], "big") not in (2, 3):
+        pytest.skip("git index format other than v2/v3 is not supported by this check")
+    return data
 
 
 def test_no_bytecode_is_tracked():
@@ -46,6 +51,7 @@ def test_guard_admits_the_package_source(tmp_path):
         REPO_ROOT / "qwed_infra",
         tmp_path / "qwed_infra",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        symlinks=True,  # keep links as links, as in a real checkout
     )
     shutil.copy2(REPO_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     result = ArtifactBoundaryGuard().verify_package_boundary(str(tmp_path / "qwed_infra"))

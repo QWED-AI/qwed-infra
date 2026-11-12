@@ -6,6 +6,7 @@ This is a release gate, not a replacement for proper security review.
 """
 
 import ast
+import os
 import sys
 from pathlib import Path
 
@@ -155,13 +156,14 @@ def check_file(filepath: Path) -> list[str]:
 def iter_source_files(root: Path) -> list[Path]:
     """Return every scanned source file under root, outside EXCLUDED_DIRS."""
     files = []
-    for path in sorted(root.rglob("*")):
-        if path.suffix.lower() not in SCANNED_SUFFIXES or not path.is_file():
-            continue
-        if any(part in EXCLUDED_DIRS for part in path.relative_to(root).parts):
-            continue
-        files.append(path)
-    return files
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune excluded directories so their trees are never walked.
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.suffix.lower() in SCANNED_SUFFIXES and path.is_file():
+                files.append(path)
+    return sorted(files)
 
 
 def main() -> int:
