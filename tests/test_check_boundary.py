@@ -50,6 +50,23 @@ def test_scan_root_under_an_excluded_name_is_still_scanned(boundary, tmp_path, m
     assert boundary.main() == 1
 
 
+def test_dangling_source_symlink_fails_the_scan(boundary, tmp_path):
+    try:
+        (tmp_path / "gone.py").symlink_to(tmp_path / "missing.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    assert boundary.main() == 1
+
+
+def test_unreadable_directory_fails_the_scan(boundary, tmp_path, monkeypatch):
+    def failing_walk(top, onerror=None, **kwargs):
+        onerror(OSError(13, "Permission denied", str(tmp_path / "locked")))
+        return iter(())
+
+    monkeypatch.setattr(boundary.os, "walk", failing_walk)
+    assert boundary.main() == 1
+
+
 def test_excluded_dirs_are_skipped_relative_to_root(boundary, tmp_path):
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__" / "x.pyw").write_text(SINK, encoding="utf-8")
