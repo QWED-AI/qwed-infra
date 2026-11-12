@@ -613,9 +613,7 @@ class TerraformParser:
             if k < len(content) and content[k] == '=' and (
                 k + 1 >= len(content) or content[k + 1] != '='
             ):
-                result.append('"')
-                result.append(content[i:j])
-                result.append('":')
+                result.extend(('"', content[i:j], '":'))
                 return k + 1
         result.append(ch)
         return i + 1

@@ -282,11 +282,20 @@ class IamGuard:
                 denies.append(Not(stmt_cond))
 
         # Built flat for the same reason as _build_match_list.
-        allow_logic = Or(*allows) if len(allows) > 1 else (allows[0] if allows else False)
-        deny_logic = And(*denies) if len(denies) > 1 else (denies[0] if denies else True)
+        allow_logic = self._flat(Or, allows, empty=False)
+        deny_logic = self._flat(And, denies, empty=True)
 
         # Access granted only if: some Allow matches AND no Deny matches
         return And(allow_logic, deny_logic)
+
+    @staticmethod
+    def _flat(combine, terms: List[Any], empty: bool):
+        """Combine terms with one flat Or/And; the identity when empty."""
+        if not terms:
+            return empty
+        if len(terms) == 1:
+            return terms[0]
+        return combine(*terms)
 
     @staticmethod
     def _normalize_statement_list(policy: Any) -> Any:
@@ -355,11 +364,8 @@ class IamGuard:
                     f"{what} is longer than {MAX_REQUEST_LENGTH} characters"
                 )
 
-    @classmethod
-    def _check_input_bounds(
-        cls, policy: Any, action: Any, resource: Any, context: Any
-    ) -> None:
-        """Refuse inputs whose size could stall the solver (#76)."""
+    @staticmethod
+    def _check_request(action: Any, resource: Any, context: Any) -> None:
         for name, value in (("action", action), ("resource", resource)):
             if not isinstance(value, str):
                 raise UnverifiablePolicyError(f"request {name} is not a string")
@@ -374,8 +380,55 @@ class IamGuard:
                 f"request context has more than {MAX_CONTEXT_ENTRIES} entries"
             )
         for key, value in context.items():
-            cls._check_key(key, "request context key")
-            cls._check_value_size(value, "request context value")
+            IamGuard._check_key(key, "request context key")
+            IamGuard._check_value_size(value, "request context value")
+
+    @classmethod
+    def _check_statement_patterns(cls, stmt: Dict[str, Any]) -> int:
+        """Bound the Action and Resource entries; return how many there are."""
+        total = 0
+        for element in ("Action", "Resource"):
+            patterns = cls._as_pattern_list(stmt.get(element, []), element)
+            if len(patterns) > MAX_PATTERNS_PER_ELEMENT:
+                raise UnverifiablePolicyError(
+                    f"{element} has more than {MAX_PATTERNS_PER_ELEMENT} entries"
+                )
+            total += len(patterns)
+            for pattern in patterns:
+                if not isinstance(pattern, str):
+                    raise UnverifiablePolicyError(f"{element} entry is not a string")
+                cls._check_pattern_size(pattern, f"{element} entry")
+        return total
+
+    @classmethod
+    def _check_statement_conditions(cls, stmt: Dict[str, Any]) -> int:
+        """Bound the Condition block; return how many entries it has."""
+        conditions = stmt.get("Condition", {})
+        if not isinstance(conditions, dict):
+            raise UnverifiablePolicyError("Condition is not a mapping")
+        entries = 0
+        for operator, restrictions in conditions.items():
+            cls._check_key(operator, "Condition operator")
+            if not isinstance(restrictions, dict):
+                raise UnverifiablePolicyError("a Condition operator block is not a mapping")
+            entries += len(restrictions)
+            for key, value in restrictions.items():
+                cls._check_key(key, "Condition key")
+                # StringLike values are wildcard patterns, so the wildcard
+                # bound applies to them too.
+                cls._check_value_size(value, "Condition value", pattern=True)
+        if entries > MAX_CONDITION_ENTRIES_PER_STATEMENT:
+            raise UnverifiablePolicyError(
+                f"statement has more than {MAX_CONDITION_ENTRIES_PER_STATEMENT} condition entries"
+            )
+        return entries
+
+    @classmethod
+    def _check_input_bounds(
+        cls, policy: Any, action: Any, resource: Any, context: Any
+    ) -> None:
+        """Refuse inputs whose size could stall the solver (#76)."""
+        cls._check_request(action, resource, context)
         if not isinstance(policy, dict):
             raise UnverifiablePolicyError("policy is not a mapping")
         statements = policy.get("Statement", [])
@@ -390,36 +443,8 @@ class IamGuard:
         for stmt in statements:
             if not isinstance(stmt, dict):
                 raise UnverifiablePolicyError("a statement is not a mapping")
-            for element in ("Action", "Resource"):
-                patterns = cls._as_pattern_list(stmt.get(element, []), element)
-                if len(patterns) > MAX_PATTERNS_PER_ELEMENT:
-                    raise UnverifiablePolicyError(
-                        f"{element} has more than {MAX_PATTERNS_PER_ELEMENT} entries"
-                    )
-                total_patterns += len(patterns)
-                for pattern in patterns:
-                    if not isinstance(pattern, str):
-                        raise UnverifiablePolicyError(f"{element} entry is not a string")
-                    cls._check_pattern_size(pattern, f"{element} entry")
-            conditions = stmt.get("Condition", {})
-            if not isinstance(conditions, dict):
-                raise UnverifiablePolicyError("Condition is not a mapping")
-            entries = 0
-            for operator, restrictions in conditions.items():
-                cls._check_key(operator, "Condition operator")
-                if not isinstance(restrictions, dict):
-                    raise UnverifiablePolicyError("a Condition operator block is not a mapping")
-                entries += len(restrictions)
-                for key, value in restrictions.items():
-                    cls._check_key(key, "Condition key")
-                    # StringLike values are wildcard patterns, so the
-                    # wildcard bound applies to them too.
-                    cls._check_value_size(value, "Condition value", pattern=True)
-            if entries > MAX_CONDITION_ENTRIES_PER_STATEMENT:
-                raise UnverifiablePolicyError(
-                    f"statement has more than {MAX_CONDITION_ENTRIES_PER_STATEMENT} condition entries"
-                )
-            total_condition_entries += entries
+            total_patterns += cls._check_statement_patterns(stmt)
+            total_condition_entries += cls._check_statement_conditions(stmt)
         if total_condition_entries > MAX_CONDITION_ENTRIES_PER_POLICY:
             raise UnverifiablePolicyError(
                 f"policy has more than {MAX_CONDITION_ENTRIES_PER_POLICY} condition entries"
