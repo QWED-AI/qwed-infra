@@ -32,65 +32,196 @@ class NetworkGuard:
     """
     Network Reachability Verification using Graph Theory (NetworkX).
 
-    Topology limitations (fail-closed if any are present):
-      - NAT Gateways (cannot model private subnet internet access)
-      - VPC Peering (cannot model cross-VPC routing)
-      - NACLs (not modeled — stateless firewall rules)
-      - Transit Gateway (cannot model multi-VPC hub routing)
+    The guard models exactly these inputs, and returns UNVERIFIABLE (a
+    result that carries no proof and must not be used for authorization
+    decisions) for anything else:
 
-    If the input topology contains any of these constructs, the guard
-    returns UNVERIFIABLE — a result that carries no proof and must not
-    be used for authorization decisions.
+      - top-level keys ``subnets``, ``route_tables`` and ``security_groups``
+      - subnets with ``id`` and ``security_groups``; each id once
+      - route tables with ``subnet_id`` and ``routes``; one per subnet;
+        route targets ``igw...`` (internet gateway) or ``local``
+      - security groups with ``ingress`` (and ``egress``, which an inbound
+        query never reads: security groups are stateful)
+      - ingress rules with ``port``, ``from_port``/``to_port`` and ``cidr``
+
+    So NAT gateways, VPC peering, NACLs, transit gateways, endpoints,
+    protocol-scoped rules, prefix lists and security-group references are
+    all refused, whatever they are called, instead of being ignored.
     """
 
-    _UNSUPPORTED_TOPOLOGY_KEYS = (
-        "nacl",
-        "nacls",
-        "vpc_peering",
-        "vpc_peerings",
-        "vpc_peering_connections",
-        "nat_gateway",
-        "nat_gateways",
-        "transit_gateway",
-        "transit_gateways",
-        "transit_gateway_attachments",
-    )
+    _SUPPORTED_TOPOLOGY_KEYS = frozenset({"subnets", "route_tables", "security_groups"})
+    _SUBNET_KEYS = frozenset({"id", "security_groups"})
+    _ROUTE_TABLE_KEYS = frozenset({"subnet_id", "routes"})
+    _SECURITY_GROUP_KEYS = frozenset({"ingress", "egress"})
+    _RULE_KEYS = frozenset({"port", "from_port", "to_port", "cidr"})
+
+    _IPV4_INTERNET = ipaddress.ip_network("0.0.0.0/0")
+    _IPV6_INTERNET = ipaddress.ip_network("::/0")
 
     def __init__(self):
         self.graph = nx.DiGraph()
         self.has_unsupported_topology = False
+        self.unsupported_reason = ""
 
-    def _normalize_port(self, value: Any) -> Optional[int]:
+    @staticmethod
+    def _normalize_port(value: Any) -> Optional[int]:
+        """Return a port number, or None for anything that is not one.
+
+        Accepts an int or a string of ASCII digits (with an optional
+        leading minus for the -1 sentinel). Floats, full-width digits,
+        underscores and out-of-range values are not ports.
+        """
         if isinstance(value, bool):
             return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
+        if isinstance(value, int):
+            number = value
+        elif isinstance(value, str):
+            text = value[1:] if value.startswith("-") else value
+            if not text or not text.isascii() or not text.isdigit():
+                return None
+            try:
+                number = int(value)
+            except (ValueError, OverflowError):
+                return None
+        else:
             return None
+        if number == -1 or 0 <= number <= 65535:
+            return number
+        return None
+
+    def _refuse(self, reason: str) -> None:
+        if not self.has_unsupported_topology:
+            self.has_unsupported_topology = True
+            self.unsupported_reason = reason
 
     def _check_unsupported_topology(self, resources: Dict[str, Any]) -> None:
-        """Scan resources for unsupported topology constructs and set flag."""
-        for key in self._UNSUPPORTED_TOPOLOGY_KEYS:
-            if resources.get(key):
-                self.has_unsupported_topology = True
+        """Refuse every construct outside the modelled set (see class doc).
+
+        Malformed input (wrong container types, a subnet without an id)
+        raises TypeError, which to_verification_context maps to BLOCKED.
+        Well-formed input the model does not cover marks the topology
+        unsupported, which maps to UNVERIFIABLE.
+        """
+        if not isinstance(resources, dict):
+            raise TypeError("resources must be a mapping")
+        unknown = sorted(set(resources) - self._SUPPORTED_TOPOLOGY_KEYS, key=str)
+        if unknown:
+            self._refuse(f"unmodelled topology keys: {unknown}")
+            return
+
+        subnets = resources.get("subnets", [])
+        if not isinstance(subnets, list):
+            raise TypeError("subnets must be a list")
+        seen_subnets = set()
+        for subnet in subnets:
+            if not isinstance(subnet, dict) or "id" not in subnet:
+                raise TypeError("each subnet must be a mapping with an id")
+            if set(subnet) - self._SUBNET_KEYS:
+                self._refuse("subnet has unmodelled fields")
                 return
+            subnet_id = subnet.get("id")
+            if subnet_id in seen_subnets:
+                self._refuse(f"duplicate subnet id {subnet_id!r}")
+                return
+            seen_subnets.add(subnet_id)
 
         route_tables = resources.get("route_tables", [])
+        if not isinstance(route_tables, list):
+            raise TypeError("route_tables must be a list")
+        routed_subnets = set()
         for rt in route_tables:
+            if not isinstance(rt, dict):
+                raise TypeError("each route table must be a mapping")
+            if set(rt) - self._ROUTE_TABLE_KEYS:
+                self._refuse("route table has unmodelled fields")
+                return
+            subnet_id = rt.get("subnet_id")
+            if subnet_id in routed_subnets:
+                self._refuse(f"more than one route table for subnet {subnet_id!r}")
+                return
+            routed_subnets.add(subnet_id)
             routes = rt.get("routes", {})
-            for _dest, target in routes.items():
+            if not isinstance(routes, dict):
+                raise TypeError("routes must be a mapping")
+            for destination, target in routes.items():
                 if not isinstance(target, str):
-                    self.has_unsupported_topology = True
+                    self._refuse("route target is not a string")
                     return
                 t = target.lower()
-                if any(t.startswith(prefix) for prefix in ("nat-", "ngw-", "tgw-", "pcx-")):
-                    self.has_unsupported_topology = True
+                if not (t == "local" or t.startswith("igw")):
+                    self._refuse(f"unmodelled route target {target!r}")
                     return
+                try:
+                    ipaddress.ip_network(destination, strict=False)
+                except (TypeError, ValueError):
+                    self._refuse(f"route destination {destination!r} is not a CIDR")
+                    return
+
+        security_groups = resources.get("security_groups", {})
+        if not isinstance(security_groups, dict):
+            raise TypeError("security_groups must be a mapping")
+        for sg in security_groups.values():
+            if not isinstance(sg, dict):
+                raise TypeError("each security group must be a mapping")
+            if set(sg) - self._SECURITY_GROUP_KEYS:
+                self._refuse("security group has unmodelled fields")
+                return
+            rules = sg.get("ingress", [])
+            if not isinstance(rules, list):
+                raise TypeError("ingress must be a list")
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    raise TypeError("each ingress rule must be a mapping")
+                if set(rule) - self._RULE_KEYS:
+                    self._refuse(
+                        "ingress rule has unmodelled fields "
+                        "(protocol, prefix lists and group references are not modelled)"
+                    )
+                    return
+                if not self._rule_ports_valid(rule):
+                    self._refuse("ingress rule has an invalid port specification")
+                    return
+
+    def _rule_ports_valid(self, rule: Dict[str, Any]) -> bool:
+        """A rule's port fields must be ports, and -1 must be the AWS form:
+        a single ``port`` of -1, or ``from_port`` and ``to_port`` both -1."""
+        if rule.get("port") is not None:
+            return self._normalize_port(rule["port"]) is not None
+        from_port = rule.get("from_port")
+        to_port = rule.get("to_port")
+        if from_port is None and to_port is None:
+            return True
+        if from_port is None or to_port is None:
+            return False
+        low = self._normalize_port(from_port)
+        high = self._normalize_port(to_port)
+        if low is None or high is None:
+            return False
+        return (low == -1) == (high == -1)
+
+    @classmethod
+    def _internet_families(cls, cidrs: List[Any]) -> set:
+        """Return the address families (4, 6) whose whole internet the
+        union of ``cidrs`` covers, so split ranges such as 0.0.0.0/1 plus
+        128.0.0.0/1 count the same as 0.0.0.0/0."""
+        by_family: Dict[int, list] = {4: [], 6: []}
+        for cidr in cidrs:
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+            except (TypeError, ValueError):
+                continue
+            by_family[network.version].append(network)
+        covered = set()
+        for version, whole in ((4, cls._IPV4_INTERNET), (6, cls._IPV6_INTERNET)):
+            if whole in ipaddress.collapse_addresses(by_family[version]):
+                covered.add(version)
+        return covered
 
     def build_graph(self, resources: Dict[str, Any]):
         """Builds a NetworkX graph from a simplified infrastructure definition."""
         self.graph.clear()
         self.has_unsupported_topology = False
+        self.unsupported_reason = ""
         self._check_unsupported_topology(resources)
         if self.has_unsupported_topology:
             return
@@ -107,13 +238,15 @@ class NetworkGuard:
             if not subnet_id:
                 continue
             routes = rt.get("routes", {})
-
-            for destination in routes:
-                target = routes[destination]
-
-                if destination in ("0.0.0.0/0", "::/0") and target.startswith("igw"):
-                    self.graph.add_edge(subnet_id, "internet", via=target)
-                    self.graph.add_edge("internet", subnet_id, via=target)
+            igw_destinations = [
+                destination for destination, target in routes.items()
+                if target.lower().startswith("igw")
+            ]
+            families = self._internet_families(igw_destinations)
+            if families:
+                via = sorted({routes[d] for d in igw_destinations})
+                self.graph.add_edge(subnet_id, "internet", via=via, families=families)
+                self.graph.add_edge("internet", subnet_id, via=via, families=families)
 
     def verify_reachability(self, resources: Dict[str, Any], source: str, destination: str, port: int) -> ComputedPath:
         """
@@ -127,9 +260,20 @@ class NetworkGuard:
         if self.has_unsupported_topology:
             return ComputedPath(
                 reachable=False, path=[], port=port, failure_code="unsupported_topology",
-                reason="Topology contains unsupported constructs (NAT, NACL, peering, transit gateway) — cannot verify",
+                reason=f"Topology contains unsupported constructs ({self.unsupported_reason}) — cannot verify",
                 unsupported_topology=True,
             )
+
+        # The queried port must be an int in range; rule fields may also be
+        # digit strings, but the query is typed as an int.
+        query_port = self._normalize_port(port) if isinstance(port, int) else None
+        if query_port is None or query_port == -1:
+            return ComputedPath(
+                reachable=False, path=[], port=0, failure_code="unsupported_topology",
+                reason=f"Queried port {port!r} is not a port number — cannot verify",
+                unsupported_topology=True,
+            )
+        port = query_port
 
         if source == "internet":
             try:
@@ -161,52 +305,21 @@ class NetworkGuard:
 
         security_groups = resources.get("security_groups", {})
 
-        ingress_allowed = False
+        # Address families the route to the internet carries.
+        routed_families = set()
+        if source == "internet" and len(path) > 1:
+            routed_families = self.graph.edges[path[0], path[1]].get("families", set())
 
+        matching_cidrs = []
         for sg_id in target_sgs:
             rules = security_groups.get(sg_id, {}).get("ingress", [])
             for rule in rules:
-                rule_port = rule.get("port")
-                rule_from = rule.get("from_port")
-                rule_to = rule.get("to_port")
-                rule_cidr = rule.get("cidr")
+                if self._rule_matches_port(rule, port) and rule.get("cidr") is not None:
+                    matching_cidrs.append(rule["cidr"])
 
-                if rule_port is not None:
-                    normalized_port = self._normalize_port(rule_port)
-                    port_match = normalized_port in (port, -1)
-                elif rule_from is not None and rule_to is not None:
-                    from_port = self._normalize_port(rule_from)
-                    to_port = self._normalize_port(rule_to)
-                    if from_port is None or to_port is None:
-                        port_match = False
-                    elif from_port == -1 or to_port == -1:
-                        port_match = True
-                    else:
-                        port_match = from_port <= to_port and from_port <= port <= to_port
-                else:
-                    port_match = False
-
-                if not port_match:
-                    continue
-
-                if rule_cidr is None:
-                    continue
-
-                try:
-                    network = ipaddress.ip_network(rule_cidr, strict=False)
-                    if source == "internet":
-                        cidr_match = rule_cidr in ("0.0.0.0/0", "::/0")
-                    else:
-                        addr = ipaddress.ip_address(source)
-                        cidr_match = addr in network
-                except (ValueError, TypeError):
-                    cidr_match = False
-
-                if cidr_match:
-                    ingress_allowed = True
-                    break
-            if ingress_allowed:
-                break
+        # The internet reaches the subnet only if, in one address family,
+        # both the routes and the union of matching rule ranges cover it.
+        ingress_allowed = bool(routed_families & self._internet_families(matching_cidrs))
 
         if not target_sgs:
             ingress_allowed = False
@@ -215,6 +328,18 @@ class NetworkGuard:
             return ComputedPath(reachable=False, path=path, reason=f"Routing exists but Security Group blocks port {port}", port=port, failure_code="sg_ingress_blocked")
 
         return ComputedPath(reachable=True, path=path, reason="Route exists and Security Groups allow traffic", port=port)
+
+    def _rule_matches_port(self, rule: Dict[str, Any], port: int) -> bool:
+        """Port fields were validated by _check_unsupported_topology."""
+        if rule.get("port") is not None:
+            return self._normalize_port(rule["port"]) in (port, -1)
+        if rule.get("from_port") is None:
+            return False
+        low = self._normalize_port(rule["from_port"])
+        high = self._normalize_port(rule["to_port"])
+        if low == -1 and high == -1:
+            return True
+        return low <= high and low <= port <= high
 
     @staticmethod
     def to_diagnostic(result: ComputedPath) -> InfraDiagnosticResult:
@@ -298,7 +423,7 @@ class NetworkGuard:
         """
         try:
             result = self.verify_reachability(resources, source, destination, port)
-        except (TypeError, ValueError, AttributeError, KeyError):
+        except (TypeError, ValueError, AttributeError, KeyError, OverflowError):
             diagnostic = InfraDiagnosticResult.blocked(
                 agent_message="Network reachability could not be verified",
                 developer_fields={

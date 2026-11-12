@@ -75,7 +75,7 @@ Converts AWS IAM Policies into logical formulas.
 Builds a directed graph of your VPC.
 *   **Reachability:** "Can an attacker on the Internet reach my Database?"
 *   **Path Analysis:** Traces routes through Subnets and Security Groups.
-*   **Limitations (fail-closed):** NAT Gateways, VPC Peering, NACLs, and Transit Gateway are not modeled. If any are present, the guard returns `UNVERIFIABLE` — the result carries no proof and must not be used for authorization decisions.
+*   **Limitations (fail-closed):** the guard models subnets (`id`, `security_groups`), route tables (`subnet_id`, `routes` to `igw...` or `local`) and security groups (`ingress` rules with `port` or `from_port`/`to_port` and `cidr`). Anything else, such as NAT gateways, VPC peering, NACLs, transit gateways, endpoints, protocol-scoped rules, prefix lists or security-group references, under any key name, returns `UNVERIFIABLE`: the result carries no proof and must not be used for authorization decisions. "Reachable from the internet" means the whole internet: the routes and the matching rules must each cover `0.0.0.0/0` or `::/0` in the same address family, alone or as a union of split ranges.
 
 ### 3. CostGuard (The Budget Enforcer)
 Prevents financial ruin.
