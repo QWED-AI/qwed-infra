@@ -75,7 +75,7 @@ def run_demo():
     res = cost.verify_budget(resources, budget_monthly=budget)
     
     if not res.within_budget:
-        print(f"   ❌ VIOLATION: Estimated cost ${res.total_monthly_cost} exceeds budget ${res.budget}")
+        print(f"   ❌ VIOLATION: {res.reason}")
         print(f"      Breakdown: {res.breakdown}")
         guards_failed += 1
     else:

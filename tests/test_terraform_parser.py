@@ -482,17 +482,26 @@ class TestNormalizeResource:
         assert result["data"]["id"] == "my_vol"
         assert result["data"]["size_gb"] == 100
 
-    def test_aws_ebs_volume_default_size(self, parser):
+    def test_aws_ebs_volume_without_size_is_not_defaulted(self, parser):
+        """No size must not become 10 GB (#75): CostGuard refuses None."""
         result = parser._normalize_resource("aws_ebs_volume", "small_vol", {})
-        assert result["data"]["size_gb"] == 10
+        assert result["data"]["size_gb"] is None
 
-    def test_unknown_resource_type_returns_none(self, parser):
+    def test_unknown_resource_type_is_recorded(self, parser):
+        """Unknown types are recorded, never dropped silently (#74)."""
         result = parser._normalize_resource("aws_s3_bucket", "my_bucket", {"acl": "private"})
-        assert result is None
+        assert result == {
+            "category": "unmodelled",
+            "data": {
+                "address": "aws_s3_bucket.my_bucket",
+                "reason": "resource type aws_s3_bucket is not modelled",
+            },
+        }
 
-    def test_aws_security_group_returns_none(self, parser):
+    def test_aws_security_group_is_recorded(self, parser):
         result = parser._normalize_resource("aws_security_group", "sg_web", {"ingress": []})
-        assert result is None
+        assert result["category"] == "unmodelled"
+        assert result["data"]["address"] == "aws_security_group.sg_web"
 
 
 # ------------------------------------------------------------------
@@ -568,13 +577,11 @@ class TestParserFailClosed:
 
         assert any("no instance_type" in e for e in exc_info.value.errors)
 
-    @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
-    def test_empty_directory_returns_empty_resources(self, mock_hcl2_load, parser, tmp_path):
-        """Directory with no .tf files should return empty resources, not raise."""
-        resources = parser.parse_directory(str(tmp_path))
-        assert resources["instances"] == []
-        assert resources["policies"] == []
-        assert resources["volumes"] == []
+    def test_empty_directory_fails_closed(self, parser, tmp_path):
+        """A directory with no .tf files must not parse to an empty model
+        that looks like verified-empty (#74, #75)."""
+        with pytest.raises(ParseError, match="No Terraform"):
+            parser.parse_directory(str(tmp_path))
 
     @patch('qwed_infra.parsers.terraform_parser.hcl2.load')
     def test_multiple_errors_all_collected(self, mock_hcl2_load, parser, tmp_path):

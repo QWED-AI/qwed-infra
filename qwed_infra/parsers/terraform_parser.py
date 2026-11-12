@@ -36,18 +36,57 @@ class TerraformParser:
         """
         Reads all .tf files in a directory and aggregates resources.
 
+        The returned model has an ``unmodelled`` list with one entry per
+        declaration the model does not represent (a resource type it does
+        not normalize, or a construct such as ``for_each``). An empty model
+        with an empty ``unmodelled`` list means the directory declared
+        nothing; it never means "declared things the parser skipped".
+
         Raises:
-            ParseError: if any .tf file fails to parse or any resource fails
-                to normalize. The exception carries a list of all errors.
+            ParseError: if the directory has no .tf files, holds files the
+                parser cannot model faithfully (Terraform JSON or override
+                files), calls a module, any .tf file fails to parse, or any
+                declaration fails to normalize. The exception carries a list
+                of all errors.
         """
         path = Path(directory_path)
+        if not path.is_dir():
+            raise ParseError([f"{directory_path} is not a directory"])
+
         combined_hcl = {}
         errors: List[str] = []
 
+        # Files Terraform loads that this parser cannot model faithfully.
+        # Refuse them rather than certify a model that leaves them out.
+        for entry in sorted(path.iterdir()):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if self._is_override_file(name):
+                errors.append(
+                    f"{name}: Terraform override files are not merged; the "
+                    f"model would describe the configuration before the override."
+                )
+            elif name.endswith(".tf.json"):
+                errors.append(
+                    f"{name}: Terraform JSON configuration files are not "
+                    f"parsed; their declarations would be missing from the model."
+                )
+
+        tf_files = [
+            f for f in sorted(path.glob("*.tf"))
+            if f.is_file() and not self._is_override_file(f.name)
+        ]
+        if not tf_files and not errors:
+            raise ParseError(
+                [f"No Terraform (.tf) files found in {directory_path}"]
+            )
+
         # 1. Read and merge generic HCL structure
-        for tf_file in sorted(path.glob("*.tf")):
+        for tf_file in tf_files:
             try:
-                with open(tf_file, "r") as f:
+                # Terraform reads configuration as UTF-8 on every platform.
+                with open(tf_file, "r", encoding="utf-8", errors="strict") as f:
                     data = hcl2.load(f)
                     data = self._normalize_hcl2_output(data)
                     for key, val in data.items():
@@ -61,6 +100,16 @@ class TerraformParser:
                 errors.append(f"Failed to parse {tf_file.name}: {e}")
                 continue
 
+        # Module calls are not expanded: the resources they declare,
+        # including IAM policies, would be invisible to every guard.
+        for module_block in combined_hcl.get("module", []):
+            names = module_block.keys() if isinstance(module_block, dict) else ["<unnamed>"]
+            for module_name in names:
+                errors.append(
+                    f"module.{module_name}: module calls are not expanded; the "
+                    f"resources they declare cannot be verified."
+                )
+
         # 2. Normalize to QWED Internal Schema — run normalization even if
         # HCL parse errors occurred, so all errors (parse + normalization)
         # are aggregated into a single ParseError.
@@ -70,6 +119,7 @@ class TerraformParser:
             "subnets": [],
             "security_groups": [],
             "volumes": [],
+            "unmodelled": [],
         }
 
         resources = combined_hcl.get("resource", [])
@@ -81,18 +131,31 @@ class TerraformParser:
                         normalized = self._normalize_resource(
                             res_type, res_name, config
                         )
-                        if normalized:
-                            cat = normalized["category"]
-                            qwed_resources[cat].append(normalized["data"])
                     except Exception as e:  # noqa: BLE001
                         errors.append(
                             f"Failed to normalize {res_type}.{res_name}: {e}"
                         )
+                        continue
+                    cat = normalized["category"]
+                    qwed_resources[cat].append(normalized["data"])
+                    qwed_resources["volumes"].extend(
+                        normalized.get("inline_volumes", [])
+                    )
 
         if errors:
             raise ParseError(errors)
 
         return qwed_resources
+
+    @staticmethod
+    def _is_override_file(name: str) -> bool:
+        """Terraform treats ``override.tf`` and ``*_override.tf`` (and their
+        ``.tf.json`` forms) as override files merged over the base files."""
+        for suffix in (".tf.json", ".tf"):
+            if name.endswith(suffix):
+                stem = name[: -len(suffix)]
+                return stem == "override" or stem.endswith("_override")
+        return False
 
     @staticmethod
     def _normalize_hcl2_output(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -130,16 +193,41 @@ class TerraformParser:
             return val.removeprefix('"').removesuffix('"')
         return val
 
+    # Resource types this parser normalizes. Every other type is recorded
+    # in the model's "unmodelled" list, or refused if it may grant access.
+    MODELLED_RESOURCE_TYPES = ("aws_instance", "aws_iam_policy", "aws_ebs_volume")
+
+    # Name fragments of resource types, attributes and blocks that carry an
+    # access policy or grant permissions ("polic" matches both policy and
+    # policies). An unmodelled resource matching one of these cannot be
+    # recorded and skipped: its grants would be invisible to IamGuard.
+    _POLICY_MARKERS = ("polic", "principal", "permission", "grant")
+
+    # Resource type families that grant or attach permissions even when no
+    # attribute name says so (for example aws_iam_user_group_membership).
+    _POLICY_BEARING_TYPE_PREFIXES = ("aws_iam_",)
+
+    # Meta-arguments and blocks whose effect on cardinality or content is
+    # not modelled for instances and volumes.
+    _UNMODELLED_META_ARGUMENTS = ("for_each", "dynamic")
+
     def _normalize_resource(
         self, res_type: str, res_name: str, config: Any
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Maps generic Terraform resource types to QWED schema.
 
+        Returns ``{"category": ..., "data": ...}``. A declaration the model
+        does not represent returns category ``"unmodelled"`` with its
+        address and the reason, so it is never dropped silently. An
+        ``aws_instance`` also returns ``"inline_volumes"`` for its
+        ``root_block_device`` and ``ebs_block_device`` blocks.
+
         Raises:
             ValueError: if a resource cannot be faithfully normalized (e.g.
-                IAM policy body cannot be extracted). The caller catches this
-                and converts it into a ParseError entry.
+                IAM policy body cannot be extracted, or an unmodelled
+                resource may grant access). The caller catches this and
+                converts it into a ParseError entry.
         """
         # hcl2 may wrap the entire config dict in a single-element list
         if isinstance(config, list) and len(config) == 1:
@@ -150,23 +238,13 @@ class TerraformParser:
                 f"not a dict — cannot normalize."
             )
         config = self._unwrap_hcl2_values(config)
+        address = f"{res_type}.{res_name}"
 
-        # --- Compute ---
-        if res_type == "aws_instance":
-            instance_type = config.get("instance_type")
-            if instance_type is None:
-                raise ValueError(
-                    f"aws_instance '{res_name}' has no instance_type — cannot "
-                    f"deterministically normalize. Refusing to assume a default."
-                )
-            return {
-                "category": "instances",
-                "data": {
-                    "id": res_name,
-                    "instance_type": instance_type,
-                    "count": config.get("count", 1),
-                },
-            }
+        if res_type not in self.MODELLED_RESOURCE_TYPES:
+            self._reject_unmodelled_policy(res_type, res_name, config)
+            return self._unmodelled(
+                address, f"resource type {res_type} is not modelled"
+            )
 
         # --- IAM ---
         if res_type == "aws_iam_policy":
@@ -183,18 +261,134 @@ class TerraformParser:
                 },
             }
 
-        # --- Storage ---
-        if res_type == "aws_ebs_volume":
+        meta = [m for m in self._UNMODELLED_META_ARGUMENTS if m in config]
+        if meta:
+            return self._unmodelled(
+                address, f"{', '.join(meta)} is not modelled"
+            )
+
+        # --- Compute ---
+        if res_type == "aws_instance":
+            instance_type = config.get("instance_type")
+            if instance_type is None:
+                raise ValueError(
+                    f"aws_instance '{res_name}' has no instance_type — cannot "
+                    f"deterministically normalize. Refusing to assume a default."
+                )
+            count = config.get("count", 1)
             return {
-                "category": "volumes",
+                "category": "instances",
                 "data": {
                     "id": res_name,
-                    "size_gb": config.get("size", 10),
-                    "volume_type": config.get("type"),
+                    "instance_type": instance_type,
+                    "count": count,
                 },
+                "inline_volumes": self._inline_block_devices(
+                    res_name, config, count
+                ),
             }
 
+        # --- Storage ---
+        # No size means the size comes from a snapshot or is unknown. Leave
+        # it as None so CostGuard refuses to price it, instead of assuming one.
+        return {
+            "category": "volumes",
+            "data": {
+                "id": res_name,
+                "size_gb": config.get("size"),
+                "volume_type": config.get("type"),
+                "count": config.get("count", 1),
+                "iops": config.get("iops"),
+                "throughput": config.get("throughput"),
+            },
+        }
+
+    @staticmethod
+    def _unmodelled(address: str, reason: str) -> Dict[str, Any]:
+        return {
+            "category": "unmodelled",
+            "data": {"address": address, "reason": reason},
+        }
+
+    @classmethod
+    def _reject_unmodelled_policy(
+        cls, res_type: str, res_name: str, config: Dict[str, Any]
+    ) -> None:
+        """Refuse an unmodelled resource that may grant access."""
+        lowered_type = res_type.lower()
+        if lowered_type.startswith(cls._POLICY_BEARING_TYPE_PREFIXES) or any(
+            marker in lowered_type for marker in cls._POLICY_MARKERS
+        ):
+            raise ValueError(
+                f"{res_type}.{res_name}: resource type may grant or attach "
+                f"permissions and is not modelled — its access cannot be verified."
+            )
+        key = cls._find_policy_key(config)
+        if key is not None:
+            raise ValueError(
+                f"{res_type}.{res_name}: unmodelled resource carries '{key}', "
+                f"which may grant access — its access cannot be verified."
+            )
+
+    @classmethod
+    def _find_policy_key(cls, value: Any) -> Optional[str]:
+        """Return the first attribute or block name, at any depth, that
+        names an access policy or grant."""
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                lowered = str(key).lower()
+                if any(marker in lowered for marker in cls._POLICY_MARKERS):
+                    return str(key)
+                found = cls._find_policy_key(nested)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = cls._find_policy_key(nested)
+                if found is not None:
+                    return found
         return None
+
+    @staticmethod
+    def _inline_block_devices(
+        res_name: str, config: Dict[str, Any], count: Any
+    ) -> List[Dict[str, Any]]:
+        """Model inline EBS storage on an instance as volumes.
+
+        ``root_block_device`` and ``ebs_block_device`` are billed like
+        ``aws_ebs_volume``, once per instance. A missing size or type stays
+        None so CostGuard refuses to price it. ``ephemeral_block_device``
+        (instance store) has no separate charge and is not a volume.
+        """
+        volumes: List[Dict[str, Any]] = []
+        for block_name in ("root_block_device", "ebs_block_device"):
+            blocks = config.get(block_name)
+            if blocks is None:
+                continue
+            if isinstance(blocks, dict):
+                blocks = [blocks]
+            if not isinstance(blocks, list):
+                raise ValueError(
+                    f"aws_instance '{res_name}': {block_name} is "
+                    f"{type(blocks).__name__}, not a block — cannot normalize."
+                )
+            for index, block in enumerate(blocks):
+                if not isinstance(block, dict):
+                    raise ValueError(
+                        f"aws_instance '{res_name}': {block_name}[{index}] is "
+                        f"{type(block).__name__}, not a block — cannot normalize."
+                    )
+                volumes.append(
+                    {
+                        "id": f"{res_name}.{block_name}[{index}]",
+                        "size_gb": block.get("volume_size"),
+                        "volume_type": block.get("volume_type"),
+                        "count": count,
+                        "iops": block.get("iops"),
+                        "throughput": block.get("throughput"),
+                    }
+                )
+        return volumes
 
     @staticmethod
     def _unwrap_hcl2_values(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -267,14 +461,35 @@ class TerraformParser:
         AWS policy variables: ``${aws:*}``, ``${saml:*}``, ``${cognito:*}``,
         ``${iam:*}``, ``${redshift:*}``, etc.
         """
-        if isinstance(value, str) and "${" in value:
-            TerraformParser._check_interpolation_value(res_name, value)
+        if isinstance(value, str):
+            TerraformParser._reject_template_directive(res_name, value)
+            if "${" in value:
+                TerraformParser._check_interpolation_value(res_name, value)
         if isinstance(value, dict):
-            for nested in value.values():
+            for key, nested in value.items():
+                # Keys are template strings too: check them like values.
+                TerraformParser._reject_unresolved_interpolation(res_name, key)
                 TerraformParser._reject_unresolved_interpolation(res_name, nested)
         elif isinstance(value, list):
             for nested in value:
                 TerraformParser._reject_unresolved_interpolation(res_name, nested)
+
+    @staticmethod
+    def _reject_template_directive(res_name: str, value: str) -> None:
+        """Reject HCL template directives (``%{if}``, ``%{for}``).
+
+        Terraform evaluates directives at plan time, so the literal text the
+        parser sees is not the value that is deployed. Fail closed, as for
+        unresolved ``${...}`` interpolation. A literal ``%%{`` escape is
+        rejected too: telling it apart from a directive is not worth the
+        risk of getting it wrong.
+        """
+        if "%{" in value:
+            raise ValueError(
+                f"aws_iam_policy '{res_name}': policy contains an HCL template "
+                f"directive in '{value}' — the deployed value cannot be "
+                f"verified deterministically."
+            )
 
     @staticmethod
     def _check_interpolation_value(res_name: str, value: str) -> None:
