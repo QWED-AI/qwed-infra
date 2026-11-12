@@ -3,10 +3,17 @@
 ## [Unreleased]
 
 ### Fixed
+- CostGuard keeps instance prices and EBS storage prices in separate tables, so a storage price key used as an instance type is an unknown instance type and blocks (#104)
+- CostGuard prices gp2 at $0.10 and gp3 at $0.08 per GB-month (us-east-1 list price); st1 and sc1 now use their list prices too. `standard` (magnetic) volumes are no longer priced and fail closed, because their per-I/O-request charge cannot be known before deployment (#102)
+- CostGuard compares the exact total with the exact budget, so a sub-cent overrun is no longer certified. The published total is rounded up to the cent and the budget down; the exact figures are kept in the new `exact_total_monthly_cost` and `exact_budget` fields, which `to_diagnostic` re-checks and records, with `pricing_region` and `pricing_catalogue_sha256` (a content hash of the price tables), in the developer fields and proof evidence of a VERIFIED diagnostic (#75, #102)
+- CostGuard multiplies volume cost by `count` and fails closed on provisioned IOPS or throughput it cannot price (gp3 above its 3000 IOPS / 125 MiB/s baseline, or on any other volume type) (#92)
 - `publish.yml` publishes only for a `v...` release tag that matches the `pyproject.toml` version, runs the boundary check and the test suite before building, installs the build toolchain and the build backend from a hash-pinned requirements file and builds with `--no-isolation`, and no longer passes `skip-existing` (#84)
 - `scripts/check_boundary.py` scans `.pyw` files as well as `.py` (case-insensitive), and applies its excluded directories relative to the scan root (#97)
 - The committed `qwed_infra/__pycache__/__init__.cpython-311.pyc` is no longer tracked (#98)
 - `snyk.yml` pins the snyk CLI version, fails instead of falling back when the dev extras do not install, and grants `security-events: write` per job instead of workflow-wide (#99)
+
+### Changed
+- `CostGuard.PRICING_CATALOG` is replaced by `INSTANCE_PRICING` (USD per instance-hour) and `VOLUME_PRICING` (USD per GB-month, keyed by volume type)
 
 ## [0.3.0] - 2026-08-24
 
