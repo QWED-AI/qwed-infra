@@ -28,6 +28,15 @@ class ComputedPath(BaseModel):
     unsupported_topology: bool = False
 
 
+class _UnsupportedTopology(Exception):
+    """A well-formed construct the model does not cover. Its reason is
+    written by the guard."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class NetworkGuard:
     """
     Network Reachability Verification using Graph Theory (NetworkX).
@@ -104,31 +113,33 @@ class NetworkGuard:
         """
         if not isinstance(resources, dict):
             raise TypeError("resources must be a mapping")
-        unknown = sorted(set(resources) - self._SUPPORTED_TOPOLOGY_KEYS, key=str)
-        if unknown:
-            self._refuse(f"unmodelled topology keys: {unknown}")
-            return
+        try:
+            unknown = sorted(set(resources) - self._SUPPORTED_TOPOLOGY_KEYS, key=str)
+            if unknown:
+                raise _UnsupportedTopology(f"unmodelled topology keys: {unknown}")
+            self._check_subnets(resources.get("subnets", []))
+            self._check_route_tables(resources.get("route_tables", []))
+            self._check_security_groups(resources.get("security_groups", {}))
+        except _UnsupportedTopology as unsupported:
+            self._refuse(unsupported.reason)
 
-        subnets = resources.get("subnets", [])
+    def _check_subnets(self, subnets: Any) -> None:
         if not isinstance(subnets, list):
             raise TypeError("subnets must be a list")
-        seen_subnets = set()
+        seen = set()
         for subnet in subnets:
             if not isinstance(subnet, dict) or "id" not in subnet:
                 raise TypeError("each subnet must be a mapping with an id")
             if set(subnet) - self._SUBNET_KEYS:
-                self._refuse("subnet has unmodelled fields")
-                return
+                raise _UnsupportedTopology("subnet has unmodelled fields")
             groups = subnet.get("security_groups", [])
             if not isinstance(groups, list) or not all(isinstance(g, str) for g in groups):
                 raise TypeError("subnet security_groups must be a list of ids")
-            subnet_id = subnet.get("id")
-            if subnet_id in seen_subnets:
-                self._refuse(f"duplicate subnet id {subnet_id!r}")
-                return
-            seen_subnets.add(subnet_id)
+            if subnet["id"] in seen:
+                raise _UnsupportedTopology(f"duplicate subnet id {subnet['id']!r}")
+            seen.add(subnet["id"])
 
-        route_tables = resources.get("route_tables", [])
+    def _check_route_tables(self, route_tables: Any) -> None:
         if not isinstance(route_tables, list):
             raise TypeError("route_tables must be a list")
         routed_subnets = set()
@@ -136,64 +147,61 @@ class NetworkGuard:
             if not isinstance(rt, dict):
                 raise TypeError("each route table must be a mapping")
             if set(rt) - self._ROUTE_TABLE_KEYS:
-                self._refuse("route table has unmodelled fields")
-                return
+                raise _UnsupportedTopology("route table has unmodelled fields")
             subnet_id = rt.get("subnet_id")
             if not isinstance(subnet_id, str) or not subnet_id:
                 # A table that names no subnet would be dropped, and the
                 # result would read as "no route" instead of unverifiable.
-                self._refuse("route table has no subnet_id")
-                return
+                raise _UnsupportedTopology("route table has no subnet_id")
             if subnet_id in routed_subnets:
-                self._refuse(f"more than one route table for subnet {subnet_id!r}")
-                return
+                raise _UnsupportedTopology(f"more than one route table for subnet {subnet_id!r}")
             routed_subnets.add(subnet_id)
             routes = rt.get("routes", {})
             if not isinstance(routes, dict):
                 raise TypeError("routes must be a mapping")
             for destination, target in routes.items():
-                if not isinstance(target, str):
-                    self._refuse("route target is not a string")
-                    return
-                t = target.lower()
-                if not (t == "local" or t.startswith("igw")):
-                    self._refuse(f"unmodelled route target {target!r}")
-                    return
-                try:
-                    ipaddress.ip_network(destination, strict=False)
-                except (TypeError, ValueError):
-                    self._refuse(f"route destination {destination!r} is not a CIDR")
-                    return
+                self._check_route(destination, target)
 
-        security_groups = resources.get("security_groups", {})
+    @staticmethod
+    def _check_route(destination: Any, target: Any) -> None:
+        if not isinstance(target, str):
+            raise _UnsupportedTopology("route target is not a string")
+        lowered = target.lower()
+        if not (lowered == "local" or lowered.startswith("igw")):
+            raise _UnsupportedTopology(f"unmodelled route target {target!r}")
+        try:
+            ipaddress.ip_network(destination, strict=False)
+        except (TypeError, ValueError):
+            raise _UnsupportedTopology(f"route destination {destination!r} is not a CIDR") from None
+
+    def _check_security_groups(self, security_groups: Any) -> None:
         if not isinstance(security_groups, dict):
             raise TypeError("security_groups must be a mapping")
         for sg in security_groups.values():
             if not isinstance(sg, dict):
                 raise TypeError("each security group must be a mapping")
             if set(sg) - self._SECURITY_GROUP_KEYS:
-                self._refuse("security group has unmodelled fields")
-                return
+                raise _UnsupportedTopology("security group has unmodelled fields")
             rules = sg.get("ingress", [])
             if not isinstance(rules, list):
                 raise TypeError("ingress must be a list")
             for rule in rules:
-                if not isinstance(rule, dict):
-                    raise TypeError("each ingress rule must be a mapping")
-                if set(rule) - self._RULE_KEYS:
-                    self._refuse(
-                        "ingress rule has unmodelled fields "
-                        "(protocol, prefix lists and group references are not modelled)"
-                    )
-                    return
-                if not self._rule_ports_valid(rule):
-                    self._refuse("ingress rule has an invalid port specification")
-                    return
-                try:
-                    ipaddress.ip_network(rule.get("cidr"), strict=False)
-                except (TypeError, ValueError):
-                    self._refuse("ingress rule has no valid cidr")
-                    return
+                self._check_rule(rule)
+
+    def _check_rule(self, rule: Any) -> None:
+        if not isinstance(rule, dict):
+            raise TypeError("each ingress rule must be a mapping")
+        if set(rule) - self._RULE_KEYS:
+            raise _UnsupportedTopology(
+                "ingress rule has unmodelled fields "
+                "(protocol, prefix lists and group references are not modelled)"
+            )
+        if not self._rule_ports_valid(rule):
+            raise _UnsupportedTopology("ingress rule has an invalid port specification")
+        try:
+            ipaddress.ip_network(rule.get("cidr"), strict=False)
+        except (TypeError, ValueError):
+            raise _UnsupportedTopology("ingress rule has no valid cidr") from None
 
     def _rule_ports_valid(self, rule: Dict[str, Any]) -> bool:
         """A rule must use exactly one port form, ``port`` or both
