@@ -204,6 +204,13 @@ def test_subnet_security_groups_must_be_a_list_of_ids(guard, groups):
         guard.verify_reachability(resources, "internet", "subnet-web", 22)
 
 
+@pytest.mark.parametrize("table", [{"routes": {"0.0.0.0/0": "igw-main"}}, {"subnet_id": None, "routes": {}}, {"subnet_id": "", "routes": {}}])
+def test_route_table_without_subnet_is_unverifiable(guard, table):
+    resources = infra()
+    resources["route_tables"].append(table)
+    assert status(guard, resources) == "UNVERIFIABLE"
+
+
 def test_two_route_tables_for_one_subnet_are_unverifiable(guard):
     resources = infra()
     resources["route_tables"].append({"subnet_id": "subnet-web", "routes": {}})

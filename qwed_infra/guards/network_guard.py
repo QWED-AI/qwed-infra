@@ -139,6 +139,11 @@ class NetworkGuard:
                 self._refuse("route table has unmodelled fields")
                 return
             subnet_id = rt.get("subnet_id")
+            if not isinstance(subnet_id, str) or not subnet_id:
+                # A table that names no subnet would be dropped, and the
+                # result would read as "no route" instead of unverifiable.
+                self._refuse("route table has no subnet_id")
+                return
             if subnet_id in routed_subnets:
                 self._refuse(f"more than one route table for subnet {subnet_id!r}")
                 return
