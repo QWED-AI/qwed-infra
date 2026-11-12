@@ -4,7 +4,7 @@
 
 ### Fixed
 - NetworkGuard models an explicit set of keys and route targets and returns UNVERIFIABLE for anything else, instead of refusing only a list of known spellings (#81)
-- NetworkGuard returns UNVERIFIABLE for ingress rules with unmodelled fields (`protocol`, `ip_protocol`, `prefix_list_id`, `source_security_group_id`, `description` and others), a one-sided `-1` port sentinel, ports that are not ASCII integers in range, a queried port that is not an int in range, duplicate subnet ids and more than one route table for a subnet; an IPv4 route no longer pairs with an IPv6-only rule (#82)
+- NetworkGuard returns UNVERIFIABLE for ingress rules with unmodelled fields (`protocol`, `ip_protocol`, `prefix_list_id`, `source_security_group_id`, `description` and others), a one-sided `-1` port sentinel, ports that are not ASCII integers in range, a queried port that is not an int in range, duplicate subnet ids, more than one route table for a subnet, a route table without a subnet, a rule mixing `port` with a range, a reversed range, a rule without a valid `cidr`, and a subnet naming an undeclared security group; an IPv4 route no longer pairs with an IPv6-only rule (#82)
 - NetworkGuard no longer raises `OverflowError` for an infinite port; it fails closed (#88)
 - NetworkGuard treats split ranges whose union covers `0.0.0.0/0` or `::/0` (for example `0.0.0.0/1` plus `128.0.0.0/1`) as the internet, for both security group rules and routes (#94)
 
