@@ -172,8 +172,16 @@ def test_valid_port_forms_still_match(guard, rule, port):
     assert status(guard, infra(rule=rule), port=port) == "VERIFIED"
 
 
-def test_reversed_range_still_does_not_match(guard):
-    assert status(guard, infra(rule={"from_port": 443, "to_port": 80, "cidr": "0.0.0.0/0"}), port=100) == "BLOCKED"
+def test_reversed_range_is_unverifiable(guard):
+    resources = infra(rule={"from_port": 443, "to_port": 80, "cidr": "0.0.0.0/0"})
+    resources["security_groups"]["sg-web"]["ingress"].append({"port": 100, "cidr": "0.0.0.0/0"})
+    assert status(guard, resources, port=100) == "UNVERIFIABLE"
+
+
+def test_undeclared_security_group_is_unverifiable(guard):
+    resources = infra(rule={"port": 80, "cidr": "0.0.0.0/0"})
+    resources["subnets"][0]["security_groups"].append("sg-missing")
+    assert status(guard, resources) == "UNVERIFIABLE"
 
 
 def test_address_families_must_match(guard):

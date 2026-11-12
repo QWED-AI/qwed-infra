@@ -120,6 +120,9 @@ class NetworkGuard:
             self._check_subnets(resources.get("subnets", []))
             self._check_route_tables(resources.get("route_tables", []))
             self._check_security_groups(resources.get("security_groups", {}))
+            self._check_group_references(
+                resources.get("subnets", []), resources.get("security_groups", {})
+            )
         except _UnsupportedTopology as unsupported:
             self._refuse(unsupported.reason)
 
@@ -188,6 +191,17 @@ class NetworkGuard:
             for rule in rules:
                 self._check_rule(rule)
 
+    @staticmethod
+    def _check_group_references(subnets: list, security_groups: dict) -> None:
+        """A subnet that names an undeclared group has rules the model
+        cannot see, so a "blocked" answer would be a guess."""
+        for subnet in subnets:
+            for group in subnet.get("security_groups", []):
+                if group not in security_groups:
+                    raise _UnsupportedTopology(
+                        f"subnet {subnet['id']!r} names undeclared security group {group!r}"
+                    )
+
     def _check_rule(self, rule: Any) -> None:
         if not isinstance(rule, dict):
             raise TypeError("each ingress rule must be a mapping")
@@ -219,7 +233,10 @@ class NetworkGuard:
         high = self._normalize_port(to_port)
         if low is None or high is None:
             return False
-        return (low == -1) == (high == -1)
+        if low == -1 or high == -1:
+            return low == high
+        # AWS rejects a range whose start is above its end.
+        return low <= high
 
     @classmethod
     def _internet_families(cls, cidrs: List[Any]) -> set:
