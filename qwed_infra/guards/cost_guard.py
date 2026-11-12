@@ -279,13 +279,11 @@ class CostGuard:
                 result.exact_budget, budget, "exact_budget"
             )
             # The published figures must be the conservative roundings of
-            # the exact ones, or the estimate is inconsistent. Rounding a
-            # huge value can raise, so it stays inside this guarded block.
-            has_exact = (
-                result.exact_total_monthly_cost is not None
-                or result.exact_budget is not None
-            )
-            published_consistent = not has_exact or (
+            # the exact ones, or the estimate is inconsistent. Without exact
+            # figures this requires published figures already in cents.
+            # Rounding a huge value raises, so it stays inside this guarded
+            # block and no unbounded figure is ever formatted.
+            published_consistent = (
                 CostGuard._display_total(exact_total) == total
                 and CostGuard._display_budget(exact_budget) == budget
             )

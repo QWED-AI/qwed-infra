@@ -293,6 +293,23 @@ def test_to_diagnostic_huge_exact_figure_blocks_instead_of_raising(guard, field)
     assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INVALID_INPUT"
 
 
+@pytest.mark.parametrize("budget", ["1e1000000000", "1e30"])
+def test_to_diagnostic_huge_published_budget_without_exact_figures_blocks(guard, budget):
+    result = guard.verify_budget({"instances": []}, budget_monthly="100")
+    result = result.model_copy(update={
+        "budget": budget, "exact_total_monthly_cost": None, "exact_budget": None,
+    })
+    diagnostic = CostGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "BLOCKED"
+    assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INVALID_INPUT"
+
+
+def test_to_diagnostic_accepts_hand_built_estimate_in_cents(guard):
+    result = guard.verify_budget({"instances": []}, budget_monthly="100")
+    result = result.model_copy(update={"exact_total_monthly_cost": None, "exact_budget": None})
+    assert CostGuard.to_diagnostic(result).status.value == "VERIFIED"
+
+
 def test_verified_diagnostic_records_exact_figures_and_region(guard):
     resources = {"instances": [{"id": "a", "instance_type": "t3.micro", "count": 1}]}
     diagnostic = CostGuard.to_diagnostic(guard.verify_budget(resources, budget_monthly="7.595"))
