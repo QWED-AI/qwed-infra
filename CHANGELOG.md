@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- CostGuard keeps instance prices and EBS storage prices in separate tables, so a storage price key used as an instance type is an unknown instance type and blocks (#104)
+- CostGuard prices gp2 at $0.10 and gp3 at $0.08 per GB-month (us-east-1 list price); st1, sc1 and standard now use their list prices too (#102)
+- CostGuard compares the exact total with the exact budget; the published total is rounded up to the cent and the budget down, so a sub-cent overrun is no longer certified (#75)
+- CostGuard multiplies volume cost by `count` and fails closed on provisioned IOPS or throughput it cannot price (gp3 above its 3000 IOPS / 125 MiB/s baseline, or on any other volume type) (#92)
+
+### Changed
+- `CostGuard.PRICING_CATALOG` is replaced by `INSTANCE_PRICING` (USD per instance-hour) and `VOLUME_PRICING` (USD per GB-month, keyed by volume type)
+
 ## [0.3.0] - 2026-08-24
 
 ### Added

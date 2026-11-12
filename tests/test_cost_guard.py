@@ -96,7 +96,8 @@ def test_known_volume_type_correctly_priced(guard):
     assert result.has_unknown_types is False
     assert "vol-gp2-vol" in result.breakdown
     assert "vol-st1-vol" in result.breakdown
-    assert Decimal(result.breakdown["vol-st1-vol"]) > Decimal(result.breakdown["vol-gp2-vol"])
+    # AWS list price: gp2 $0.10 per GB-month, st1 $0.045 (#102).
+    assert Decimal(result.breakdown["vol-gp2-vol"]) > Decimal(result.breakdown["vol-st1-vol"])
 
 
 def test_unknown_volume_type_to_diagnostic_blocked(guard):
@@ -211,7 +212,9 @@ def test_duplicate_unknown_volume_type_no_collision(guard):
     assert "unknown-nonexistent-storage#1" in result.breakdown
 
 
-def test_float_drift_no_false_positive(guard):
+def test_sub_cent_overrun_is_not_certified(guard):
+    # Exact cost 0.0104 * 2 * 730 = 15.184, over a 15.18 budget by 0.004.
+    # Both sides used to be rounded to the cent before the comparison (#75).
     resources = {
         "instances": [
             {"id": "a", "instance_type": "t3.micro", "count": 1},
@@ -219,20 +222,125 @@ def test_float_drift_no_false_positive(guard):
         ]
     }
     result = guard.verify_budget(resources, budget_monthly="15.18")
-    assert result.within_budget is True
-    assert "within budget" in result.reason.lower()
+    assert result.within_budget is False
+    assert "EXCEEDS budget" in result.reason
+    assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
+    assert guard.verify_budget(resources, budget_monthly="15.184").within_budget is True
 
 
-def test_float_drift_at_boundary(guard):
+def test_exact_boundary_comparison(guard):
     resources = {
         "instances": [
             {"id": "a", "instance_type": "t3.micro", "count": 1},
         ]
     }
-    result = guard.verify_budget(resources, budget_monthly="7.59")
+    # Exact cost 7.592.
+    assert guard.verify_budget(resources, budget_monthly="7.592").within_budget is True
+    assert guard.verify_budget(resources, budget_monthly="7.5919").within_budget is False
+    assert guard.verify_budget(resources, budget_monthly="7.59").within_budget is False
+    assert guard.verify_budget(resources, budget_monthly="7.60").within_budget is True
+
+
+def test_published_figures_round_conservatively(guard):
+    resources = {"instances": [{"id": "a", "instance_type": "t3.micro", "count": 1}]}
+    result = guard.verify_budget(resources, budget_monthly="7.599")
+    # Total rounds up, budget rounds down.
+    assert result.total_monthly_cost == "7.60"
+    assert result.budget == "7.59"
+
+
+def test_to_diagnostic_rejects_hand_built_sub_cent_overrun(guard):
+    result = guard.verify_budget({"instances": []}, budget_monthly="15.18")
+    result.total_monthly_cost = "15.184"
+    result.within_budget = True
+    diagnostic = CostGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "BLOCKED"
+    assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INCONSISTENT"
+
+
+@pytest.mark.parametrize("storage_key", [
+    "gp2-storage-gb", "gp3-storage-gb", "st1-storage-gb",
+    "sc1-storage-gb", "standard-storage-gb", "gp2", "gp3",
+])
+def test_storage_key_as_instance_type_is_unknown(guard, storage_key):
+    # #104: volume prices must not be reachable from an instance lookup.
+    resources = {"instances": [{"id": "a", "instance_type": storage_key, "count": 1}]}
+    result = guard.verify_budget(resources, budget_monthly="100")
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert storage_key in result.reason
+    assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
+
+
+@pytest.mark.parametrize("instance_type", ["t3.micro", "p4d.24xlarge", "db.t3.micro"])
+def test_instance_type_as_volume_type_is_unknown(guard, instance_type):
+    resources = {"volumes": [{"id": "v", "volume_type": instance_type, "size_gb": 10}]}
+    result = guard.verify_budget(resources, budget_monthly="1000000")
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+
+
+@pytest.mark.parametrize("vol_type,monthly,budget", [
+    ("gp3", "80.00", "25"),
+    ("gp2", "100.00", "50"),
+])
+def test_gp2_gp3_priced_at_aws_list_price(guard, vol_type, monthly, budget):
+    # #102: 1000 GB at $0.08 (gp3) and $0.10 (gp2) per GB-month, us-east-1.
+    resources = {"volumes": [{"id": "v", "volume_type": vol_type, "size_gb": 1000}]}
+    result = guard.verify_budget(resources, budget_monthly=budget)
+    assert result.total_monthly_cost == monthly
+    assert result.within_budget is False
+    assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
+    assert guard.verify_budget(resources, budget_monthly=monthly).within_budget is True
+
+
+def test_volume_count_multiplies_cost(guard):
+    # #92: 50 x 1000 GB gp3 is 50 x $80.
+    single = {"volumes": [{"id": "v", "volume_type": "gp3", "size_gb": 1000}]}
+    fifty = {"volumes": [{"id": "v", "volume_type": "gp3", "size_gb": 1000, "count": 50}]}
+    assert guard.verify_budget(single, budget_monthly="1000").within_budget is True
+    result = guard.verify_budget(fifty, budget_monthly="1000")
+    assert result.total_monthly_cost == "4000.00"
+    assert result.within_budget is False
+    assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
+
+
+@pytest.mark.parametrize("count", [0, -1, "50", 1.5, True, None])
+def test_invalid_volume_count_fails_closed(guard, count):
+    resources = {"volumes": [{"id": "v", "volume_type": "gp3", "size_gb": 10, "count": count}]}
+    result = guard.verify_budget(resources, budget_monthly="1000")
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "invalid-count-v" in result.breakdown
+
+
+@pytest.mark.parametrize("extra", [
+    {"iops": 3000},
+    {"throughput": 125},
+    {"iops": 3000, "throughput": 125},
+])
+def test_gp3_baseline_performance_is_included(guard, extra):
+    resources = {"volumes": [{"id": "v", "volume_type": "gp3", "size_gb": 100, **extra}]}
+    result = guard.verify_budget(resources, budget_monthly="100")
     assert result.within_budget is True
-    result_below = guard.verify_budget(resources, budget_monthly="7.58")
-    assert result_below.within_budget is False
+    assert result.total_monthly_cost == "8.00"
+
+
+@pytest.mark.parametrize("vol_type,extra", [
+    ("gp3", {"iops": 16000}),
+    ("gp3", {"throughput": 1000}),
+    ("gp3", {"iops": "16000"}),
+    ("gp3", {"iops": 0}),
+    ("gp2", {"iops": 3000}),
+    ("st1", {"throughput": 500}),
+])
+def test_unpriced_provisioned_performance_fails_closed(guard, vol_type, extra):
+    resources = {"volumes": [{"id": "v", "volume_type": vol_type, "size_gb": 100, **extra}]}
+    result = guard.verify_budget(resources, budget_monthly="100000")
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "unpriced-v" in result.breakdown
+    assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
 
 
 def test_invalid_count_non_int(guard):
