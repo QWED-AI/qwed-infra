@@ -318,6 +318,18 @@ def test_verified_diagnostic_records_exact_figures_and_region(guard):
         assert source["exact_total_monthly_cost"] == "7.5920"
         assert source["exact_budget"] == "7.595"
         assert source["pricing_region"] == "us-east-1"
+        assert source["pricing_catalogue_sha256"] == CostGuard.pricing_catalogue_sha256()
+
+
+def test_catalogue_identifier_changes_with_any_price(guard, monkeypatch):
+    before = CostGuard.pricing_catalogue_sha256()
+    assert len(before) == 64
+    monkeypatch.setitem(CostGuard.VOLUME_PRICING, "gp3", "0.081")
+    assert CostGuard.pricing_catalogue_sha256() != before
+    monkeypatch.undo()
+    assert CostGuard.pricing_catalogue_sha256() == before
+    monkeypatch.setitem(CostGuard.INSTANCE_PRICING, "t3.micro", "0.0105")
+    assert CostGuard.pricing_catalogue_sha256() != before
 
 
 def test_to_diagnostic_rejects_exact_overrun_even_if_published_fits(guard):

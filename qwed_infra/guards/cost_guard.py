@@ -1,3 +1,5 @@
+import hashlib
+import json
 from decimal import Decimal, DecimalException, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Dict, Optional
 from pydantic import BaseModel
@@ -100,6 +102,23 @@ class CostGuard:
         """Round a budget down to the cent, so the published figure never
         overstates the budget that was checked."""
         return budget_monthly.quantize(TWO_PLACES, rounding=ROUND_FLOOR)
+
+    @classmethod
+    def pricing_catalogue_sha256(cls) -> str:
+        """Identify the price catalogue by its content.
+
+        The hash covers the region and both price tables, so any change to
+        a price, a type or the region gives a different identifier, and a
+        verdict can be traced to the exact prices it was computed from.
+        """
+        catalogue = {
+            "region": cls.PRICING_REGION,
+            "instance_pricing": cls.INSTANCE_PRICING,
+            "volume_pricing": cls.VOLUME_PRICING,
+            "gp3_baseline": [cls.GP3_BASELINE_IOPS, cls.GP3_BASELINE_THROUGHPUT_MIBPS],
+        }
+        payload = json.dumps(catalogue, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _exact_or_published(
@@ -360,6 +379,7 @@ class CostGuard:
             "exact_total_monthly_cost": decimal_text(exact_total),
             "exact_budget": decimal_text(exact_budget),
             "pricing_region": CostGuard.PRICING_REGION,
+            "pricing_catalogue_sha256": CostGuard.pricing_catalogue_sha256(),
         }
         trace = build_trace(COST_WITHIN_BUDGET, "ALLOWED")
         return InfraDiagnosticResult.verified(
