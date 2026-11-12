@@ -1,0 +1,15 @@
+# Build toolchain for .github/workflows/publish.yml, installed with
+# --require-hashes (Python 3.10 on ubuntu-latest). Hashes are the PyPI
+# sha256 digests of the py3-none-any wheels.
+build==1.6.1 \
+    --hash=sha256:ecd351a4be9d35a9eaaba244a7687143c9c7d4aea6ac964e7e7ddab20cbcf4e7
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pyproject_hooks==1.3.3 \
+    --hash=sha256:5fc53fdac9f7bd63fbcdc868fb5f90b4784d78a53a3d3388cd738b807441a20b
+tomli==2.5.0 \
+    --hash=sha256:32a7b79ac57a2e83670ce329ccf675798bc5a2094783a63676866b70503f2e2b
+# Needed by build on Windows only (os_name == "nt"); listed so the same
+# file also installs on a Windows maintainer machine.
+colorama==0.4.6 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6

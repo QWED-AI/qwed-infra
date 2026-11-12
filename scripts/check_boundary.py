@@ -13,6 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_ROOT = REPO_ROOT
 EXCLUDED_DIRS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 
+# Python source the interpreter will import or run. ``.pyw`` is ordinary
+# Python (Windows runs it without a console). ``.pyi`` stubs are not
+# executed by the import system, so they are not scanned. Suffixes are
+# compared case-insensitively, as Windows imports ``X.PY`` too.
+SCANNED_SUFFIXES = {".py", ".pyw"}
+
 # Full call names that are forbidden (dotted names)
 FORBIDDEN_CALLS = {
     "os.system",
@@ -146,6 +152,18 @@ def check_file(filepath: Path) -> list[str]:
     return errors
 
 
+def iter_source_files(root: Path) -> list[Path]:
+    """Return every scanned source file under root, outside EXCLUDED_DIRS."""
+    files = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix.lower() not in SCANNED_SUFFIXES or not path.is_file():
+            continue
+        if any(part in EXCLUDED_DIRS for part in path.relative_to(root).parts):
+            continue
+        files.append(path)
+    return files
+
+
 def main() -> int:
     errors: list[str] = []
 
@@ -154,9 +172,7 @@ def main() -> int:
         print(f"  [CONFIG_ERROR] Scan root not found or not a directory: {SCAN_ROOT}")
         return 1
 
-    for pyfile in sorted(SCAN_ROOT.rglob("*.py")):
-        if any(part in EXCLUDED_DIRS for part in pyfile.parts):
-            continue
+    for pyfile in iter_source_files(SCAN_ROOT):
         errors.extend(check_file(pyfile))
 
     if errors:

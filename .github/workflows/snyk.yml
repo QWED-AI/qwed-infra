@@ -15,12 +15,19 @@ on:
 
 permissions:
   contents: read
-  security-events: write
+
+# Pinned so a new snyk release cannot run with SNYK_TOKEN before it is
+# reviewed. Bump deliberately.
+env:
+  SNYK_CLI_VERSION: "1.1308.3"
 
 jobs:
   snyk-python:
     name: Snyk Python Dependencies
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # SARIF upload
     steps:
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
@@ -30,12 +37,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install Snyk CLI
-        run: npm install -g snyk
+        run: npm install -g "snyk@${SNYK_CLI_VERSION}"
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]" || pip install -e .
+          pip install -e ".[dev]"
           pip freeze > requirements.txt
 
       - name: Snyk Python dependency scan
@@ -52,11 +59,14 @@ jobs:
   snyk-iac:
     name: Snyk IaC (Terraform)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # SARIF upload
     steps:
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Install Snyk CLI
-        run: npm install -g snyk
+        run: npm install -g "snyk@${SNYK_CLI_VERSION}"
 
       - name: Snyk IaC Terraform scan
         env:
@@ -72,11 +82,14 @@ jobs:
   snyk-code:
     name: Snyk Code SAST
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # SARIF upload
     steps:
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Install Snyk CLI
-        run: npm install -g snyk
+        run: npm install -g "snyk@${SNYK_CLI_VERSION}"
 
       - name: Snyk Code analysis
         env:
