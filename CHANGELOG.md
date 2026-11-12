@@ -16,6 +16,10 @@
 - IamGuard returns UNVERIFIABLE for statements that use `NotAction`, `NotResource` or `NotPrincipal`, or a `Principal` other than `*`, or that have no `Action` or `Resource`, instead of modelling them as matching nothing; a policy without `Statement` is UNVERIFIABLE, and a single-object `Statement` is accepted. TerraformParser also refuses `NotAction`, `NotResource` and `NotPrincipal` (#67)
 - IamGuard refuses policies over fixed size bounds (statements, entries, entry length, wildcards, condition entries and values, request length, request context size) as UNVERIFIABLE, builds the policy logic over the concrete request values and as flat expressions, and treats a Z3 `unknown` as UNVERIFIABLE instead of a proven denial (#76)
 - IamGuard records only the exception type for unexpected errors, so no traceback or host path reaches diagnostics or VC evidence (#87)
+- NetworkGuard models an explicit set of keys and route targets and returns UNVERIFIABLE for anything else, instead of refusing only a list of known spellings (#81)
+- NetworkGuard returns UNVERIFIABLE for ingress rules with unmodelled fields (`protocol`, `ip_protocol`, `prefix_list_id`, `source_security_group_id`, `description` and others), a one-sided `-1` port sentinel, ports that are not ASCII integers in range, a queried port that is not an int in range, duplicate subnet ids, more than one route table for a subnet, a route table without a subnet, a rule mixing `port` with a range, a reversed range, a rule without a valid `cidr`, and a subnet naming an undeclared security group; an IPv4 route no longer pairs with an IPv6-only rule (#82)
+- NetworkGuard no longer raises `OverflowError` for an infinite port; it fails closed (#88)
+- NetworkGuard treats split ranges whose union covers `0.0.0.0/0` or `::/0` (for example `0.0.0.0/1` plus `128.0.0.0/1`) as the internet, for both security group rules and routes (#94)
 
 ### Changed
 - The parsed model has a new `unmodelled` key (a list of `{"address", "reason"}` entries); `TerraformParser._normalize_resource` returns an `unmodelled` entry instead of `None` for types it does not model
