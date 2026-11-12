@@ -26,6 +26,10 @@ def git_index_bytes() -> bytes:
     index = git_dir / "index"
     if not index.is_file():
         pytest.skip("not a git checkout")
+    if any(git_dir.glob("sharedindex.*")):
+        # A split index keeps unchanged entries in a shared file; this
+        # reader does not merge them, so it cannot vouch for the result.
+        pytest.skip("split git index is not supported by this check")
     return index.read_bytes()
 
 

@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
-- `publish.yml` publishes only for a `v...` release tag that matches the `pyproject.toml` version, runs the boundary check and the test suite before building, installs the build toolchain from a hash-pinned requirements file, and no longer passes `skip-existing` (#84)
+- `publish.yml` publishes only for a `v...` release tag that matches the `pyproject.toml` version, runs the boundary check and the test suite before building, installs the build toolchain and the build backend from a hash-pinned requirements file and builds with `--no-isolation`, and no longer passes `skip-existing` (#84)
 - `scripts/check_boundary.py` scans `.pyw` files as well as `.py` (case-insensitive), and applies its excluded directories relative to the scan root (#97)
 - The committed `qwed_infra/__pycache__/__init__.cpython-311.pyc` is no longer tracked (#98)
 - `snyk.yml` pins the snyk CLI version, fails instead of falling back when the dev extras do not install, and grants `security-events: write` per job instead of workflow-wide (#99)

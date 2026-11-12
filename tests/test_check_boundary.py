@@ -40,6 +40,16 @@ def test_stub_files_are_not_scanned(boundary, tmp_path):
     assert boundary.main() == 0
 
 
+def test_scan_root_under_an_excluded_name_is_still_scanned(boundary, tmp_path, monkeypatch):
+    # A checkout at .../venv/project used to be skipped entirely, because
+    # the excluded names were matched against the absolute path.
+    root = tmp_path / "venv" / "project"
+    root.mkdir(parents=True)
+    (root / "tool.py").write_text(SINK, encoding="utf-8")
+    monkeypatch.setattr(boundary, "SCAN_ROOT", root)
+    assert boundary.main() == 1
+
+
 def test_excluded_dirs_are_skipped_relative_to_root(boundary, tmp_path):
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__" / "x.pyw").write_text(SINK, encoding="utf-8")

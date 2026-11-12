@@ -49,7 +49,9 @@ jobs:
       run: |
         pip install --require-hashes --only-binary=:all: -r .github/requirements/publish-build.txt
     - name: Build package
-      run: python -m build
+      # --no-isolation builds with the hash-pinned backend installed above
+      # instead of installing build requirements unhashed.
+      run: python -m build --no-isolation
     - name: Publish package distributions to PyPI
       # v1.14.2 (twine >= 7): the older release/v1 pin ships twine < 7,
       # which rejects Metadata-Version 2.5 emitted by floating hatchling.
