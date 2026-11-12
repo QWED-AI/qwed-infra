@@ -65,6 +65,7 @@ def test_empty_model_only_when_nothing_declared(parser, tmp_path):
     'resource "aws_s3_bucket" "b" {\n  bucket = "b"\n  acl    = "public-read"\n}',
     'resource "aws_s3_bucket_acl" "a" {\n  bucket = "b"\n}',
     'resource "aws_lambda_function_url" "u" {\n  function_name = "f"\n  authorization_type = "NONE"\n}',
+    'resource "aws_cognito_identity_pool_roles_attachment" "c" {\n  identity_pool_id = "p"\n  roles = {\n    unauthenticated = "arn:aws:iam::1:role/guest"\n  }\n}',
 ])
 def test_unmodelled_access_bearing_resources_fail_closed(parser, tmp_path, block):
     write(tmp_path, "main.tf", block + "\n")

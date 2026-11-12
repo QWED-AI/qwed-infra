@@ -208,7 +208,7 @@ class TerraformParser:
     # Matched as a whole underscore-separated word only, so "acl" in
     # aws_s3_bucket_acl or acl = "public-read" counts, but not inside a
     # longer word.
-    _POLICY_WORDS = ("acl",)
+    _POLICY_WORDS = ("acl", "roles")
 
     # Resource type families that grant or attach permissions even when no
     # attribute name says so (for example aws_iam_user_group_membership).
@@ -364,20 +364,25 @@ class TerraformParser:
         """Return the first attribute or block name, at any depth, that
         names an access policy or grant."""
         if isinstance(value, dict):
-            for key, nested in value.items():
-                if str(key) in cls._NON_ACCESS_KEYS:
-                    continue
-                if cls._names_access(str(key)):
-                    return str(key)
-                found = cls._find_policy_key(nested)
-                if found is not None:
-                    return found
-            return None
+            return cls._find_policy_key_in_mapping(value)
         if isinstance(value, list):
             for nested in value:
                 found = cls._find_policy_key(nested)
                 if found is not None:
                     return found
+        return None
+
+    @classmethod
+    def _find_policy_key_in_mapping(cls, mapping: Dict[Any, Any]) -> Optional[str]:
+        for key, nested in mapping.items():
+            name = str(key)
+            if name in cls._NON_ACCESS_KEYS:
+                continue
+            if cls._names_access(name):
+                return name
+            found = cls._find_policy_key(nested)
+            if found is not None:
+                return found
         return None
 
     @staticmethod
