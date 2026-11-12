@@ -64,6 +64,7 @@ def test_empty_model_only_when_nothing_declared(parser, tmp_path):
     'resource "aws_kms_grant" "g" {\n  key_id = "k"\n  grantee_principal = "arn:aws:iam::1:root"\n}',
     'resource "aws_s3_bucket" "b" {\n  bucket = "b"\n  acl    = "public-read"\n}',
     'resource "aws_s3_bucket_acl" "a" {\n  bucket = "b"\n}',
+    'resource "aws_lambda_function_url" "u" {\n  function_name = "f"\n  authorization_type = "NONE"\n}',
 ])
 def test_unmodelled_access_bearing_resources_fail_closed(parser, tmp_path, block):
     write(tmp_path, "main.tf", block + "\n")

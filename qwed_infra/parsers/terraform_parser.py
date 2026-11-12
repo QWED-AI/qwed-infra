@@ -204,7 +204,7 @@ class TerraformParser:
     # access policy or grant permissions ("polic" matches both policy and
     # policies). An unmodelled resource matching one of these cannot be
     # recorded and skipped: its grants would be invisible to IamGuard.
-    _POLICY_MARKERS = ("polic", "principal", "permission", "grant")
+    _POLICY_MARKERS = ("polic", "principal", "permission", "grant", "authoriz")
     # Matched as a whole underscore-separated word only, so "acl" in
     # aws_s3_bucket_acl or acl = "public-read" counts, but not inside a
     # longer word.
