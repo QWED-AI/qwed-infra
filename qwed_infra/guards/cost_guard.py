@@ -26,6 +26,12 @@ class CostEstimate(BaseModel):
     budget: str
     reason: str
     has_unknown_types: bool = False
+    # Unrounded figures the budget decision was made on. The published
+    # total_monthly_cost is rounded up to the cent and budget down, so a
+    # re-check on those alone would reject a plan within budget by less
+    # than a cent. None for estimates built by hand.
+    exact_total_monthly_cost: Optional[str] = None
+    exact_budget: Optional[str] = None
 
 
 class CostGuard:
@@ -54,16 +60,15 @@ class CostGuard:
     # EBS storage (USD per GB-month), us-east-1 on-demand list prices from
     # https://aws.amazon.com/ebs/pricing/. Prices differ by region; this
     # catalogue prices us-east-1 only.
-    # io1/io2 are omitted on purpose: their provisioned IOPS charge is not
-    # modelled, so they stay unknown and fail closed.
-    # standard (magnetic) also bills per I/O request; that usage-based charge
-    # is not modelled.
+    # Omitted on purpose, so they stay unknown and fail closed:
+    # - io1/io2: their provisioned IOPS charge is not modelled.
+    # - standard (magnetic): it also bills per I/O request, a usage-based
+    #   charge that cannot be known before deployment.
     VOLUME_PRICING = {
         "gp2": "0.10",
         "gp3": "0.08",
         "st1": "0.045",
         "sc1": "0.015",
-        "standard": "0.05",
     }
 
     # gp3 includes this baseline performance in the storage price. Anything
@@ -91,6 +96,16 @@ class CostGuard:
         """Round a budget down to the cent, so the published figure never
         overstates the budget that was checked."""
         return budget_monthly.quantize(TWO_PLACES, rounding=ROUND_FLOOR)
+
+    @staticmethod
+    def _exact_or_published(
+        exact: Optional[str], published: Decimal, field_name: str
+    ) -> Decimal:
+        """Parse an exact figure, or use the published one when the estimate
+        carries none (an estimate built by hand)."""
+        if exact is None:
+            return published
+        return parse_decimal_input(exact, field_name)
 
     @staticmethod
     def _build_reason(
@@ -244,6 +259,8 @@ class CostGuard:
             budget=decimal_text(self._display_budget(budget)),
             reason=reason,
             has_unknown_types=has_unknown,
+            exact_total_monthly_cost=decimal_text(total_monthly),
+            exact_budget=decimal_text(budget),
         )
 
     @staticmethod
@@ -251,6 +268,12 @@ class CostGuard:
         try:
             total = parse_decimal_input(result.total_monthly_cost, "total_monthly_cost")
             budget = parse_decimal_input(result.budget, "budget")
+            exact_total = CostGuard._exact_or_published(
+                result.exact_total_monthly_cost, total, "exact_total_monthly_cost"
+            )
+            exact_budget = CostGuard._exact_or_published(
+                result.exact_budget, budget, "exact_budget"
+            )
         except ValueError:
             return InfraDiagnosticResult.blocked(
                 agent_message=_INVALID_INPUT_MESSAGE,
@@ -264,12 +287,21 @@ class CostGuard:
                     "audit_trace": build_trace(COST_UNKNOWN_RESOURCE, "INVALID_INPUT"),
                 },
             )
-        # Re-check on the published figures without rounding them again: the
-        # total is rounded up and the budget down, so a plan the exact
-        # comparison rejected can never look within budget here.
+        # Re-check the decision on the exact figures, without rounding.
+        # The published figures must be the conservative roundings of the
+        # exact ones, or the estimate is inconsistent.
+        has_exact = (
+            result.exact_total_monthly_cost is not None
+            or result.exact_budget is not None
+        )
+        published_consistent = not has_exact or (
+            CostGuard._display_total(exact_total) == total
+            and CostGuard._display_budget(exact_budget) == budget
+        )
         expected_within_budget = (
-            total <= budget
+            exact_total <= exact_budget
             and not result.has_unknown_types
+            and published_consistent
         )
         if result.within_budget != expected_within_budget:
             trace_rule = (

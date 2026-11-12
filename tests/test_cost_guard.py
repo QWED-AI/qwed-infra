@@ -258,6 +258,51 @@ def test_to_diagnostic_rejects_hand_built_sub_cent_overrun(guard):
     assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INCONSISTENT"
 
 
+@pytest.mark.parametrize("budget", ["7.592", "7.595", "7.5999"])
+def test_sub_cent_margin_within_budget_is_verified(guard, budget):
+    # Exact cost 7.592. The published total (7.60) is above the published
+    # budget (7.59), but the decision and its re-check use the exact figures.
+    resources = {"instances": [{"id": "a", "instance_type": "t3.micro", "count": 1}]}
+    result = guard.verify_budget(resources, budget_monthly=budget)
+    assert result.within_budget is True
+    assert result.exact_total_monthly_cost == "7.5920"
+    assert result.exact_budget == budget
+    assert CostGuard.to_diagnostic(result).status.value == "VERIFIED"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("exact_total_monthly_cost", "7.50"),
+    ("exact_budget", "8.00"),
+    ("exact_total_monthly_cost", "not-a-number"),
+])
+def test_to_diagnostic_rejects_exact_figures_that_disagree(guard, field, value):
+    resources = {"instances": [{"id": "a", "instance_type": "t3.micro", "count": 1}]}
+    result = guard.verify_budget(resources, budget_monthly="7.592")
+    setattr(result, field, value)
+    assert CostGuard.to_diagnostic(result).status.value == "BLOCKED"
+
+
+def test_to_diagnostic_rejects_exact_overrun_even_if_published_fits(guard):
+    resources = {"instances": [{"id": "a", "instance_type": "t3.micro", "count": 2}]}
+    result = guard.verify_budget(resources, budget_monthly="15.19")
+    assert result.within_budget is True
+    result.exact_budget = "15.18"
+    result.budget = "15.18"
+    diagnostic = CostGuard.to_diagnostic(result)
+    assert diagnostic.status.value == "BLOCKED"
+    assert diagnostic.developer_fields["audit_trace"]["outcome"] == "INCONSISTENT"
+
+
+def test_standard_volume_fails_closed(guard):
+    # Magnetic volumes also bill per I/O request, which cannot be priced
+    # before deployment.
+    resources = {"volumes": [{"id": "v", "volume_type": "standard", "size_gb": 100}]}
+    result = guard.verify_budget(resources, budget_monthly="1000")
+    assert result.within_budget is False
+    assert result.has_unknown_types is True
+    assert "standard" in result.reason
+
+
 @pytest.mark.parametrize("storage_key", [
     "gp2-storage-gb", "gp3-storage-gb", "st1-storage-gb",
     "sc1-storage-gb", "standard-storage-gb", "gp2", "gp3",
