@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-13
+
 ### Security
 - ArtifactBoundaryGuard checked only the wheel target table, but hatchling builds from more configuration. It now refuses, as unmodelled:
   - a `hatch.toml` file (hatchling merges it over `[tool.hatch]`), a root `PKG-INFO` file, and `[project] dynamic` fields other than `version` (hatchling fills them from PKG-INFO or hooks)
