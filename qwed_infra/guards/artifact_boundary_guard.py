@@ -13,6 +13,13 @@ from qwed_infra.audit import (
     build_trace,
 )
 from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
+from qwed_infra.guards._hatch_config import (
+    HATCH_TOML,
+    check_build_system,
+    check_project_files,
+    check_root_modules,
+    check_tool_hatch,
+)
 from qwed_infra.verification_context import VerificationContextDocument
 
 _ARTIFACT_CONSTRAINT_ID = "artifact_boundary_guard.verify_package_boundary"
@@ -320,17 +327,59 @@ class ArtifactBoundaryGuard:
         findings.extend(pkg_findings)
         only_include = wheel.get("only-include", [])
         findings.extend(ArtifactBoundaryGuard._check_wheel_only_include(only_include, package_name, pp_name, base_dir, boundary_dir))
+        # force-include adds files even with only-packages, so it always
+        # widens the boundary. With only-packages, include and artifacts can
+        # only select files under the package roots this guard scans.
+        widening = ["force-include"] if wheel.get("force-include") else []
         if not wheel.get("only-packages", False):
-            widening = [opt for opt in ("include", "artifacts", "force-include") if wheel.get(opt)]
-            if widening:
-                findings.append(
-                    ArtifactBoundaryFinding(
-                        finding_type="missing_control",
-                        severity="BLOCK",
-                        file_path=pp_name,
-                        reason=f"Wheel uses unmodeled inclusion options that may widen boundary: {', '.join(sorted(widening))}",
-                    )
+            widening += [opt for opt in ("include", "artifacts") if wheel.get(opt)]
+        if widening:
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="missing_control",
+                    severity="BLOCK",
+                    file_path=pp_name,
+                    reason=f"Wheel uses unmodeled inclusion options that may widen boundary: {', '.join(sorted(widening))}",
                 )
+            )
+        return findings
+
+    @classmethod
+    def _is_sensitive_name(cls, name: str) -> bool:
+        return name in FORBIDDEN_NAMES or cls._matches_any(Path(name), SENSITIVE_FILE_PATTERNS)
+
+    @classmethod
+    def _check_hatch_inputs(cls, data: dict, project_root: Path, pp_name: str) -> list[ArtifactBoundaryFinding]:
+        """Configuration hatchling reads besides the wheel target table:
+        hatch.toml, [build-system] keys and requirements, [tool.hatch] build,
+        version and metadata options, and the [project] fields and files it
+        ships in the wheel metadata."""
+        findings = []
+        hatch_toml = project_root / HATCH_TOML
+        if hatch_toml.exists() or hatch_toml.is_symlink():
+            findings.append(
+                ArtifactBoundaryFinding(
+                    finding_type="unknown_boundary",
+                    severity="BLOCK",
+                    file_path=HATCH_TOML,
+                    reason="hatch.toml is not modelled — hatchling merges it over [tool.hatch], so the checked configuration is not the one that builds",
+                )
+            )
+        reasons = (
+            check_build_system(data)
+            + check_tool_hatch(data, cls._is_sensitive_name, project_root)
+            + check_project_files(data, project_root, cls._is_sensitive_name)
+            + check_root_modules(project_root)
+        )
+        findings.extend(
+            ArtifactBoundaryFinding(
+                finding_type="unknown_boundary",
+                severity="BLOCK",
+                file_path=pp_name,
+                reason=reason,
+            )
+            for reason in reasons
+        )
         return findings
 
     @staticmethod
@@ -394,6 +443,7 @@ class ArtifactBoundaryGuard:
                 )
             )
             return findings
+        findings.extend(ArtifactBoundaryGuard._check_hatch_inputs(data, pyproject_path.parent, pp_name))
         if not isinstance(wheel, dict):
             findings.append(
                 ArtifactBoundaryFinding(
@@ -609,7 +659,7 @@ class ArtifactBoundaryGuard:
             # Bind package identity to the directory actually scanned.
             package_name = Path(package_dir).name
             result = self.verify_package_boundary(package_dir, pyproject_path, package_name)
-        except (TypeError, ValueError, AttributeError, KeyError, OSError, RuntimeError):
+        except (TypeError, ValueError, AttributeError, LookupError, OSError, RuntimeError):
             diagnostic = InfraDiagnosticResult.blocked(
                 agent_message="Package boundary could not be verified",
                 developer_fields={
