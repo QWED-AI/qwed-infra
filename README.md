@@ -38,7 +38,7 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 ## 💡 What QWED-Infra Is (and Isn't)
 
 ### ✅ QWED-Infra IS:
-*   **A Deterministic Verification Engine:** Uses **Z3 Theorem Prover** to *prove* IAM action/resource matching, with IP and date conditions evaluated deterministically in Python.
+*   **A Deterministic Verification Engine:** Uses the **Z3 Theorem Prover** to combine IAM statements under Deny precedence. Wildcard matching and conditions on the concrete request are decided deterministically in Python and enter the proof as constants.
 *   **A Graph Analyzer:** Uses **NetworkX** to map and verify network reachability (Reachability Analysis).
 *   **An Artifact Boundary Gate:** Scans release packages for secrets, debug artifacts, and misconfigured build paths — blocks unsafe releases before they ship.
 *   **Deterministic:** Inputs are code, output is `True/False` with 100% certainty.
@@ -56,7 +56,7 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 | Feature | TFLint / Checkov / TFSec | QWED-Infra |
 | :--- | :--- | :--- |
 | **Approach** | Regex / Static Pattern Matching | **Symbolic Execution (Z3) & Graph Theory** |
-| **IAM Logic** | Can catch `s3:*` text match | Proves `Allow` overrides `Deny` logically |
+| **IAM Logic** | Can catch `s3:*` text match | Decides each statement on the request and proves `Deny` overrides `Allow` |
 | **Network** | Checks generic "port 22 open" | Traces `Internet -> IGW -> Route -> SG -> Subnet` (fail-closed on NAT/NACL/peering) |
 | **Cost** | N/A (usually distinct tools) | **Deterministic Pre-Deployment Estimation** |
 | **Accuracy** | High False Positives | **Deterministic Correctness** |
@@ -66,10 +66,12 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 ## 🛡️ The Four Guards
 
 ### 1. IamGuard (The Security Math)
-Converts AWS IAM Policies into logical formulas.
-*   **Wildcards:** Handles `s3:Get*` vs `s3:GetObject` — proved symbolically in Z3.
-*   **Logic:** Proves `Deny` statements always win — proved symbolically in Z3.
-*   **Context:** Verifies against specific conditions (e.g., `aws:SourceIp`, `aws:CurrentTime`) — evaluated deterministically in Python, with full trace in diagnostic output.
+Decides whether an AWS IAM policy allows a concrete request.
+*   **Wildcards:** Handles `s3:Get*` vs `s3:GetObject`: actions match case-insensitively (ASCII case folding; non-ASCII is UNVERIFIABLE), `*` matches any run of characters and `?` exactly one (in a resource ARN, within one colon-separated segment unless the `*` ends the last segment), and policy variables such as `${aws:username}` are substituted under `"Version": "2012-10-17"`. Decided deterministically in Python.
+*   **Logic:** `Deny` statements always win: each statement is decided on the concrete request, and Z3 combines the outcomes under Deny precedence.
+*   **Context:** Verifies against specific conditions (e.g., `aws:SourceIp`, `aws:CurrentTime`), with full trace in diagnostic output. Supported operators: the `String*`, `Arn*`, `Numeric*`, `Date*` and `IpAddress` families, `Bool`, `Null`, and the `...IfExists` forms; condition key names match case-insensitively, and an absent key follows AWS (true for negated and `...IfExists` operators). Numbers, dates and booleans are parsed strictly. A condition the guard cannot evaluate (an unsupported operator such as `ForAnyValue:`, a malformed value, a multi-valued request key, an unresolved policy variable) makes the result `UNVERIFIABLE` whenever the decision depends on it, for Allow and Deny alike.
+*   **Least privilege:** `verify_least_privilege` judges full access (`*` on `*`) from the patterns: an Allow made only of `*`, `?` and `:` counts whatever its condition, a Deny counts only when it is unconditional and names every action and resource with `*`, and an Allow whose coverage cannot be told (such as `a*`) makes the result UNVERIFIABLE.
+*   **Limitations (fail-closed):** `NotAction`, `NotResource`, `NotPrincipal`, a `Principal` other than `*`, set operators (`ForAnyValue:`, `ForAllValues:`), policy variable defaults, a policy variable before the fifth colon of a resource ARN and a wildcard in its service segment return `UNVERIFIABLE`. `verify_least_privilege` detects only a grant of every action on every resource: `iam:*`, enumerated services and privilege-escalation paths are not flagged. A guard may be shared between threads; solver calls are serialised.
 
 ### 2. NetworkGuard (The Topology Graph)
 Builds a directed graph of your VPC.
@@ -108,10 +110,13 @@ from qwed_infra import IamGuard
 
 guard = IamGuard()
 policy = {
-    "Effect": "Allow",
-    "Action": "s3:GetObject",
-    "Resource": "*",
-    "Condition": {"IpAddress": {"aws:SourceIp": "192.168.1.0/24"}}
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Effect": "Allow",
+        "Action": "s3:GetObject",
+        "Resource": "*",
+        "Condition": {"IpAddress": {"aws:SourceIp": "192.168.1.0/24"}},
+    }],
 }
 
 # Verify: Is it accessible from the public internet?

@@ -2,21 +2,42 @@
 IAM Policy Verification using Z3 SMT Solver.
 Provides deterministic proof of whether a policy allows/denies access.
 """
-import ipaddress
-from datetime import datetime
+import threading
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-from z3 import And, InRe, Not, Or, Solver, StringVal, sat, unsat
+from z3 import And, Not, Or, Solver, sat, unsat
 
 from qwed_infra.audit import (
     IAM_DENY_PRECEDENCE,
     build_trace,
 )
 from qwed_infra.diagnostics import InfraDiagnosticResult, InfraDiagnosticStatus
+from qwed_infra.guards._iam_matching import (
+    POLICY_VARIABLES_VERSION,
+    CannotEvaluate,
+    MatchContext,
+    any_of,
+    evaluate_condition,
+    match_action,
+    match_resource,
+)
 from qwed_infra.verification_context import VerificationContextDocument
 
 _IAM_CONSTRAINT_ID = "iam_guard.verify_access"
+
+# Z3 objects share one global context, which is not thread-safe: concurrent
+# solver calls can abort the process. Solver use is serialised.
+_Z3_LOCK = threading.Lock()
+
+
+def _name_list(names: List[str], limit: int = 5, width: int = 64) -> str:
+    """Up to ``limit`` names, each cut to ``width`` characters, and a count
+    of the rest, so a hostile document cannot fill diagnostics."""
+    shown = [repr(name[:width]) for name in names[:limit]]
+    if len(names) > limit:
+        shown.append(f"and {len(names) - limit} more")
+    return ", ".join(shown)
 
 
 class UnverifiablePolicyError(ValueError):
@@ -30,6 +51,12 @@ class UnverifiablePolicyError(ValueError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class _StatementUnevaluable(UnverifiablePolicyError):
+    """A statement whose resource or condition cannot be evaluated for this
+    request. The decision is UNVERIFIABLE unless it does not depend on that
+    statement."""
 
 
 # Input bounds (#76). Z3 cost grows faster than linearly in these, so a
@@ -48,10 +75,81 @@ MAX_CONDITION_ENTRIES_PER_POLICY = 1000
 MAX_REQUEST_LENGTH = 2048
 MAX_CONTEXT_ENTRIES = 100
 MAX_LIST_VALUE_ENTRIES = 100
+MAX_CONDITION_VALUES_PER_POLICY = 2500
+# Total characters of Action, Resource and condition value text in one
+# policy. Matching cost grows with request length times pattern text, and
+# AWS policy documents stay far below this (tens of kilobytes at most).
+MAX_PATTERN_CHARACTERS_PER_POLICY = 131072
 
 # Statement elements the model does not represent (#67). A statement that
 # uses one is refused, never modelled as matching nothing.
 _UNMODELLED_STATEMENT_ELEMENTS = ("NotAction", "NotResource", "NotPrincipal")
+
+_STATEMENT = "Statement"
+_ACTION = "Action"
+_RESOURCE = "Resource"
+_CONDITION = "Condition"
+_EFFECT = "Effect"
+_ALLOW = "Allow"
+_DENY = "Deny"
+
+# Least-privilege scope of an Allow's Action or Resource list: it covers
+# everything, it cannot cover everything, or the guard cannot tell.
+_SCOPE_ALL = "all"
+_SCOPE_UNKNOWN = "unknown"
+_SCOPE_SOME = "some"
+_WILDCARD_ONLY = frozenset("*?:")
+
+_POLICY_VERSIONS = ("2012-10-17", "2008-10-17")
+_POLICY_ELEMENTS = frozenset({"Version", "Id", _STATEMENT})
+
+
+def _wildcard_only(text: str) -> bool:
+    """Only "*", "?" and ":", with at least one "*": such a pattern matches
+    every action or ARN, or all but some too short to exist. Counting it
+    as full access can only over-report a violation."""
+    return "*" in text and set(text) <= _WILDCARD_ONLY
+
+
+def _action_scope(pattern: Any) -> str:
+    if not isinstance(pattern, str):
+        return _SCOPE_UNKNOWN
+    if _wildcard_only(pattern):
+        return _SCOPE_ALL
+    prefix = pattern.split(":", 1)[0]
+    if "*" in prefix or "?" in prefix:
+        return _SCOPE_UNKNOWN  # e.g. one of "a*", "b*", ... covering all
+    return _SCOPE_SOME
+
+
+def _resource_scope(pattern: Any) -> str:
+    if not isinstance(pattern, str):
+        return _SCOPE_UNKNOWN
+    if _wildcard_only(pattern) or (pattern[:3].lower() == "arn" and _wildcard_only(pattern[3:])):
+        return _SCOPE_ALL
+    head = pattern.split(":", 5)
+    if "${" in ":".join(head[:5]) or not pattern.startswith("arn:") or any(
+        "*" in part or "?" in part for part in head[1:3]
+    ):
+        return _SCOPE_UNKNOWN  # partition or service wildcarded, or not an ARN
+    return _SCOPE_SOME
+
+
+def _list_scope(patterns: List[Any], scope_of) -> str:
+    scopes = {scope_of(p) for p in patterns}
+    for scope in (_SCOPE_ALL, _SCOPE_UNKNOWN):
+        if scope in scopes:
+            return scope
+    return _SCOPE_SOME
+
+
+# Every element a statement may carry. Anything else (a misspelt
+# "Conditon", say) is refused: AWS rejects such a policy, and ignoring the
+# key would drop what it was meant to say.
+_STATEMENT_ELEMENTS = frozenset({
+    "Sid", _EFFECT, "Principal", _ACTION, _RESOURCE, _CONDITION,
+    *_UNMODELLED_STATEMENT_ELEMENTS,
+})
 
 
 class IamPolicy(BaseModel):
@@ -76,169 +174,44 @@ class IamGuard:
     """
 
     def __init__(self):
-        self.solver = Solver()
-
-    # ------------------------------------------------------------------
-    # Pattern Matching (Z3 Regex — handles interior/multiple wildcards)
-    # ------------------------------------------------------------------
-
-    def _match_pattern(self, z3_variable, pattern: str):
-        """
-        Return a Z3 constraint matching variable against an IAM wildcard pattern.
-        Translates '*' to Z3 Kleene star over any character.
-        Handles patterns with zero or more wildcards (including interior ones).
-        """
-        if pattern == "*":
-            return True
-
-        from z3 import Concat, Re, Star, Range
-        any_char_star = Star(Range(StringVal("\x00"), StringVal("\xff")))
-
-        parts = pattern.split("*")
-        if len(parts) == 1:
-            # No wildcard — exact match
-            return z3_variable == StringVal(pattern)
-
-        # Build regex: literal [.* literal]* anchored implicitly by Z3 InRe
-        if not parts[0]:
-            regex = any_char_star
-        else:
-            regex = Re(StringVal(parts[0]))
-
-        for part in parts[1:]:
-            if part:
-                regex = Concat(regex, any_char_star, Re(StringVal(part)))
-            else:
-                regex = Concat(regex, any_char_star)
-
-        return InRe(z3_variable, regex)
-
-
-    # ------------------------------------------------------------------
-    # Condition Operators
-    # ------------------------------------------------------------------
-
-    def _apply_string_equals(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """Apply StringEquals condition operator."""
-        if ctx_val is None:
-            return False
-        return And(cond_expr, StringVal(ctx_val) == StringVal(required_val))
-
-    def _apply_string_like(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """Apply StringLike condition operator (supports IAM wildcards)."""
-        if ctx_val is None:
-            return False
-        return And(cond_expr, self._match_pattern(StringVal(ctx_val), required_val))
-
-    def _apply_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """
-        Apply IpAddress condition operator using exact ipaddress membership.
-        Correctly handles all CIDR mask sizes including /12, /20, etc.
-        """
-        if ctx_val is None:
-            return False
-        try:
-            ctx_ip = ipaddress.ip_address(ctx_val)
-            if "/" not in required_val:
-                return And(cond_expr, ctx_ip == ipaddress.ip_address(required_val))
-            return And(cond_expr, ctx_ip in ipaddress.ip_network(required_val, strict=False))
-        except ValueError:
-            return False
-
-    def _apply_not_ip_address(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """
-        Apply NotIpAddress condition operator using exact ipaddress membership.
-        Correctly handles all CIDR mask sizes including /12, /20, etc.
-        """
-        if ctx_val is None:
-            return False
-        try:
-            ctx_ip = ipaddress.ip_address(ctx_val)
-            if "/" not in required_val:
-                return And(cond_expr, ctx_ip != ipaddress.ip_address(required_val))
-            return And(cond_expr, ctx_ip not in ipaddress.ip_network(required_val, strict=False))
-        except ValueError:
-            return False
-
-    def _apply_date_less_than(self, ctx_val: Optional[str], required_val: str, cond_expr):
-        """
-        Apply DateLessThan operator using ISO8601 string comparison.
-        ISO8601 dates are lexicographically sortable when same length/format.
-        """
-        if ctx_val is None:
-            return False
-        try:
-            ctx_dt = datetime.fromisoformat(ctx_val.replace("Z", "+00:00"))
-            req_dt = datetime.fromisoformat(required_val.replace("Z", "+00:00"))
-            if ctx_dt < req_dt:
-                return cond_expr  # Condition satisfied — keep existing constraints
-            return False  # Date condition fails → deny
-        except (ValueError, TypeError):
-            return False  # Malformed date or naive/aware mismatch → fail closed
-
-    # ------------------------------------------------------------------
-    # Condition Block Evaluation
-    # ------------------------------------------------------------------
-
-    def _evaluate_operator(self, operator: str, ctx_val, required_val, cond_expr):
-        """
-        Dispatch to the correct condition operator handler.
-        Returns False (fail-closed) for unknown/unimplemented operators.
-        """
-        if operator == "StringEquals":
-            return self._apply_string_equals(ctx_val, required_val, cond_expr)
-        if operator == "StringLike":
-            return self._apply_string_like(ctx_val, required_val, cond_expr)
-        if operator == "IpAddress":
-            return self._apply_ip_address(ctx_val, required_val, cond_expr)
-        if operator == "NotIpAddress":
-            return self._apply_not_ip_address(ctx_val, required_val, cond_expr)
-        if operator == "DateLessThan":
-            return self._apply_date_less_than(ctx_val, required_val, cond_expr)
-        # Unknown operator: fail closed (deny access) to prevent privilege escalation
-        return False
-
-    def _evaluate_condition(self, condition_block: Dict, context: Dict) -> Any:
-        """
-        Evaluate an IAM condition block against a request context.
-        Returns a Z3 expression (or bool) representing the combined condition.
-        """
-        cond_expr = True
-        for operator, restrictions in condition_block.items():
-            for key, required_val in restrictions.items():
-                ctx_val = context.get(key)
-                cond_expr = self._evaluate_operator(operator, ctx_val, required_val, cond_expr)
-        return cond_expr
+        with _Z3_LOCK:
+            self.solver = Solver()
 
     # ------------------------------------------------------------------
     # Statement Building
     # ------------------------------------------------------------------
 
-    def _build_match_list(self, z3_var, patterns: List[str]):
-        """Build a Z3 OR-expression matching a variable against a list of patterns.
+    def _build_statement_condition(
+        self,
+        stmt: Dict,
+        action: str,
+        resource: str,
+        ctx: MatchContext,
+        least_privilege: bool = False,
+    ) -> bool:
+        """Whether a single IAM statement applies to the request.
 
-        The disjunction is built flat: a left-nested chain of binary Or
-        terms grows the expression depth with the list length and can
-        overflow the native stack inside Z3.
+        A resource or condition that cannot be evaluated raises
+        _StatementUnevaluable when the statement's action matches; the
+        policy logic then decides whether the result depends on it.
+
+        In least-privilege mode the question is whether some request context
+        reaches the action, so a statement's Condition is not evaluated
+        against the synthetic context: a conditional Allow counts as
+        applying and a conditional Deny as not applying.
         """
-        constraints = [
-            True if pattern == "*" else self._match_pattern(z3_var, pattern)
-            for pattern in patterns
-        ]
-        if not constraints:
-            return False
-        if len(constraints) == 1:
-            return constraints[0]
-        return Or(*constraints)
-
-    def _build_statement_condition(self, stmt: Dict, s_action, s_resource, context: Dict):
-        """Build the Z3 condition for a single IAM statement."""
+        is_allow = self._statement_effect(stmt) == _ALLOW
+        unknown = sorted(str(key) for key in stmt if key not in _STATEMENT_ELEMENTS)
+        if unknown:
+            raise UnverifiablePolicyError(
+                f"statement has elements that are not part of the policy language: {_name_list(unknown)}"
+            )
         unmodelled = [e for e in _UNMODELLED_STATEMENT_ELEMENTS if e in stmt]
         if unmodelled:
             raise UnverifiablePolicyError(
                 f"statement uses {', '.join(unmodelled)}, which is not modelled"
             )
-        for element in ("Action", "Resource"):
+        for element in (_ACTION, _RESOURCE):
             if element not in stmt:
                 raise UnverifiablePolicyError(f"statement has no {element}")
         # The request carries no principal, so the model is principal
@@ -247,43 +220,103 @@ class IamGuard:
             raise UnverifiablePolicyError(
                 "statement restricts Principal, which is not modelled"
             )
-        p_actions = stmt.get("Action", [])
-        if isinstance(p_actions, str):
-            p_actions = [p_actions]
+        p_actions = self._as_pattern_list(stmt.get(_ACTION, []), _ACTION)
+        p_resources = self._as_pattern_list(stmt.get(_RESOURCE, []), _RESOURCE)
+        conditions = stmt.get(_CONDITION, {})
+        if least_privilege:
+            return self._least_privilege_applies(is_allow, conditions, p_actions, p_resources)
+        try:
+            if not any_of(lambda p=p: match_action(action, p) for p in p_actions):
+                return False
+            if not any_of(lambda p=p: match_resource(resource, p, ctx) for p in p_resources):
+                return False
+            if least_privilege:
+                return True
+            return evaluate_condition(conditions, ctx)
+        except CannotEvaluate as exc:
+            raise _StatementUnevaluable(exc.reason) from None
 
-        p_resources = stmt.get("Resource", [])
-        if isinstance(p_resources, str):
-            p_resources = [p_resources]
+    @classmethod
+    def _least_privilege_applies(
+        cls, is_allow: bool, conditions: Any, p_actions: List[Any], p_resources: List[Any]
+    ) -> bool:
+        """Whether a statement grants full access in least-privilege mode,
+        judged from its patterns rather than by matching the synthetic "*"
+        request."""
+        if not is_allow:
+            # The synthetic "*" request is not a real action or resource, so
+            # a Deny counts only when it names every action and every
+            # resource outright, and has no condition some context could
+            # avoid.
+            return not conditions and cls._names_everything(p_actions) and cls._names_everything(p_resources)
+        scopes = {_list_scope(p_actions, _action_scope), _list_scope(p_resources, _resource_scope)}
+        if scopes == {_SCOPE_ALL}:
+            return True
+        if _SCOPE_SOME in scopes:
+            return False
+        raise _StatementUnevaluable(
+            "least-privilege check cannot tell whether this Allow covers every action and resource"
+        )
 
-        action_match = self._build_match_list(s_action, p_actions)
-        resource_match = self._build_match_list(s_resource, p_resources)
-        condition_match = self._evaluate_condition(stmt.get("Condition", {}), context)
+    @staticmethod
+    def _statement_effect(stmt: Dict[str, Any]) -> str:
+        effect = stmt.get(_EFFECT)
+        if effect not in (_ALLOW, _DENY):
+            raise UnverifiablePolicyError("statement Effect is not Allow or Deny")
+        return effect
 
-        return And(action_match, resource_match, condition_match)
+    @staticmethod
+    def _names_everything(patterns: List[Any]) -> bool:
+        """A pattern made only of "*" matches every action or resource."""
+        return any(isinstance(p, str) and p and set(p) == {"*"} for p in patterns)
 
     # ------------------------------------------------------------------
     # Policy Logic (order-independent deny precedence)
     # ------------------------------------------------------------------
 
-    def _build_policy_logic(self, policy: Dict, s_action, s_resource, context: Dict):
+    def _build_policy_logic(
+        self,
+        policy: Dict,
+        action: str,
+        resource: str,
+        ctx: MatchContext,
+        least_privilege: bool = False,
+    ):
         """
         Build Z3 logic for the full policy with correct IAM deny precedence.
         Explicit Deny always overrides Allow, regardless of statement order.
         Pattern: And(Or(all_allows), And(Not(deny1), Not(deny2), ...))
+
+        Statements that cannot be evaluated are set aside. The decision
+        stands without them when a Deny that could be evaluated applies, or
+        when every one of them is an Allow and an evaluated Allow already
+        applies. Otherwise the decision is UNVERIFIABLE.
         """
-        allows = []
-        denies = []
+        allows: List[bool] = []
+        denies: List[bool] = []
+        unevaluable = {_ALLOW: [], _DENY: []}
 
-        for stmt in policy.get("Statement", []):
-            stmt_cond = self._build_statement_condition(stmt, s_action, s_resource, context)
-            if stmt.get("Effect", "Deny") == "Allow":
-                allows.append(stmt_cond)
-            else:
-                denies.append(Not(stmt_cond))
+        for stmt in policy.get(_STATEMENT, []):
+            effect = self._statement_effect(stmt)
+            try:
+                applies = self._build_statement_condition(
+                    stmt, action, resource, ctx, least_privilege
+                )
+            except _StatementUnevaluable as exc:
+                unevaluable[effect].append(exc.reason)
+                continue
+            (allows if effect == _ALLOW else denies).append(applies)
 
-        # Built flat for the same reason as _build_match_list.
+        if not any(denies):
+            if unevaluable[_DENY]:
+                raise UnverifiablePolicyError(unevaluable[_DENY][0])
+            if unevaluable[_ALLOW] and not any(allows):
+                raise UnverifiablePolicyError(unevaluable[_ALLOW][0])
+
+        # Built flat for the same reason as _build_match_list in earlier
+        # versions: deep binary chains can overflow Z3's native stack.
         allow_logic = self._flat(Or, allows, empty=False)
-        deny_logic = self._flat(And, denies, empty=True)
+        deny_logic = self._flat(And, [Not(d) for d in denies], empty=True)
 
         # Access granted only if: some Allow matches AND no Deny matches
         return And(allow_logic, deny_logic)
@@ -304,10 +337,17 @@ class IamGuard:
         changed)."""
         if not isinstance(policy, dict):
             raise UnverifiablePolicyError("policy is not a mapping")
-        if "Statement" not in policy:
+        unknown = sorted(str(key) for key in policy if key not in _POLICY_ELEMENTS)
+        if unknown:
+            raise UnverifiablePolicyError(
+                f"policy has elements that are not part of the policy language: {_name_list(unknown)}"
+            )
+        if "Version" in policy and policy["Version"] not in _POLICY_VERSIONS:
+            raise UnverifiablePolicyError("policy Version is not 2012-10-17 or 2008-10-17")
+        if _STATEMENT not in policy:
             raise UnverifiablePolicyError("policy has no Statement")
-        if isinstance(policy["Statement"], dict):
-            return {**policy, "Statement": [policy["Statement"]]}
+        if isinstance(policy[_STATEMENT], dict):
+            return {**policy, _STATEMENT: [policy[_STATEMENT]]}
         return policy
 
     @staticmethod
@@ -324,7 +364,7 @@ class IamGuard:
             raise UnverifiablePolicyError(
                 f"{what} is longer than {MAX_PATTERN_LENGTH} characters"
             )
-        if pattern.count("*") > MAX_WILDCARDS_PER_PATTERN:
+        if pattern.count("*") + pattern.count("?") > MAX_WILDCARDS_PER_PATTERN:
             raise UnverifiablePolicyError(
                 f"{what} has more than {MAX_WILDCARDS_PER_PATTERN} wildcards"
             )
@@ -387,8 +427,10 @@ class IamGuard:
     def _check_statement_patterns(cls, stmt: Dict[str, Any]) -> int:
         """Bound the Action and Resource entries; return how many there are."""
         total = 0
-        for element in ("Action", "Resource"):
+        for element in (_ACTION, _RESOURCE):
             patterns = cls._as_pattern_list(stmt.get(element, []), element)
+            if element in stmt and not patterns:
+                raise UnverifiablePolicyError(f"{element} is empty")
             if len(patterns) > MAX_PATTERNS_PER_ELEMENT:
                 raise UnverifiablePolicyError(
                     f"{element} has more than {MAX_PATTERNS_PER_ELEMENT} entries"
@@ -403,7 +445,7 @@ class IamGuard:
     @classmethod
     def _check_statement_conditions(cls, stmt: Dict[str, Any]) -> int:
         """Bound the Condition block; return how many entries it has."""
-        conditions = stmt.get("Condition", {})
+        conditions = stmt.get(_CONDITION, {})
         if not isinstance(conditions, dict):
             raise UnverifiablePolicyError("Condition is not a mapping")
         entries = 0
@@ -423,6 +465,27 @@ class IamGuard:
             )
         return entries
 
+    @staticmethod
+    def _count_condition_values(stmt: Dict[str, Any]) -> int:
+        """Each value in a condition list is a separate comparison (for
+        StringLike, a separate pattern)."""
+        return sum(
+            len(value) if isinstance(value, list) else 1
+            for restrictions in stmt.get(_CONDITION, {}).values()
+            for value in restrictions.values()
+        )
+
+    @classmethod
+    def _count_pattern_characters(cls, stmt: Dict[str, Any]) -> int:
+        """Characters of Action, Resource and condition value text."""
+        texts = cls._as_pattern_list(stmt.get(_ACTION, []), _ACTION) + cls._as_pattern_list(
+            stmt.get(_RESOURCE, []), _RESOURCE
+        )
+        for restrictions in stmt.get(_CONDITION, {}).values():
+            for value in restrictions.values():
+                texts.extend(value if isinstance(value, list) else [value])
+        return sum(len(text) for text in texts if isinstance(text, str))
+
     @classmethod
     def _check_input_bounds(
         cls, policy: Any, action: Any, resource: Any, context: Any
@@ -431,7 +494,7 @@ class IamGuard:
         cls._check_request(action, resource, context)
         if not isinstance(policy, dict):
             raise UnverifiablePolicyError("policy is not a mapping")
-        statements = policy.get("Statement", [])
+        statements = policy.get(_STATEMENT, [])
         if not isinstance(statements, list):
             raise UnverifiablePolicyError("Statement is not a list")
         if len(statements) > MAX_STATEMENTS:
@@ -440,11 +503,23 @@ class IamGuard:
             )
         total_patterns = 0
         total_condition_entries = 0
+        total_condition_values = 0
+        total_characters = 0
         for stmt in statements:
             if not isinstance(stmt, dict):
                 raise UnverifiablePolicyError("a statement is not a mapping")
             total_patterns += cls._check_statement_patterns(stmt)
             total_condition_entries += cls._check_statement_conditions(stmt)
+            total_condition_values += cls._count_condition_values(stmt)
+            total_characters += cls._count_pattern_characters(stmt)
+        if total_characters > MAX_PATTERN_CHARACTERS_PER_POLICY:
+            raise UnverifiablePolicyError(
+                f"policy has more than {MAX_PATTERN_CHARACTERS_PER_POLICY} characters of pattern text"
+            )
+        if total_condition_values > MAX_CONDITION_VALUES_PER_POLICY:
+            raise UnverifiablePolicyError(
+                f"policy has more than {MAX_CONDITION_VALUES_PER_POLICY} condition values"
+            )
         if total_condition_entries > MAX_CONDITION_ENTRIES_PER_POLICY:
             raise UnverifiablePolicyError(
                 f"policy has more than {MAX_CONDITION_ENTRIES_PER_POLICY} condition entries"
@@ -477,40 +552,58 @@ class IamGuard:
         Returns:
             VerificationResult with verified/allowed flags and Z3 proof string.
         """
+        return self._verify(policy, action, resource, context)
+
+    @staticmethod
+    def _collect_condition_evaluations(policy: Dict[str, Any], ctx: MatchContext) -> List[Dict[str, Any]]:
+        """Condition metadata for the audit trace. Every condition is decided
+        in Python on the concrete request; Z3 combines the outcomes under
+        Deny precedence."""
+        evaluations = []
+        for stmt in policy.get(_STATEMENT, []):
+            for operator, restrictions in stmt.get(_CONDITION, {}).items():
+                for key, required_val in restrictions.items():
+                    present, value = ctx.lookup(key)
+                    evaluations.append({
+                        "operator": operator,
+                        "key": key,
+                        "context_value": str(value) if present else "None",
+                        "required_value": str(required_val),
+                        "evaluated_in": "python",
+                    })
+        return evaluations
+
+    def _verify(
+        self,
+        policy: Any,
+        action: Any,
+        resource: Any,
+        context: Optional[Dict[str, Any]],
+        least_privilege: bool = False,
+    ) -> VerificationResult:
         if context is None:
             context = {}
         try:
             policy = self._normalize_statement_list(policy)
             self._check_input_bounds(policy, action, resource, context)
-            # The request is concrete, so the policy is built directly over
-            # the request values. Pinning free variables to the same values
-            # with an equality is equivalent but leaves Z3 far more work
-            # (minutes for a policy with a thousand patterns, see #76).
-            s_action = StringVal(action)
-            s_resource = StringVal(resource)
-
-            # Collect condition metadata for audit trace
-            _Z3_OPS = {"StringEquals", "StringLike"}
-            condition_evaluations = []
-            for stmt in policy.get("Statement", []):
-                conditions = stmt.get("Condition", {})
-                for operator, restrictions in conditions.items():
-                    evaluated_in = "z3" if operator in _Z3_OPS else "python"
-                    for key, required_val in restrictions.items():
-                        condition_evaluations.append({
-                            "operator": operator,
-                            "key": key,
-                            "context_value": str(context.get(key)),
-                            "required_value": str(required_val),
-                            "evaluated_in": evaluated_in,
-                        })
-
-            policy_logic = self._build_policy_logic(policy, s_action, s_resource, context)
-
-            self.solver.reset()
-            self.solver.add(policy_logic)
-
-            outcome = self.solver.check()
+            # Policy variables are substituted only under the 2012-10-17
+            # policy language version; with any other or no version AWS
+            # reads them as literal text.
+            ctx = MatchContext(
+                context, variables=policy.get("Version") == POLICY_VARIABLES_VERSION
+            )
+            condition_evaluations = self._collect_condition_evaluations(policy, ctx)
+            # The request is concrete, so each statement is decided on the
+            # request values directly; Z3 combines them under Deny
+            # precedence (#76).
+            with _Z3_LOCK:
+                # Building the formula also touches Z3's shared context.
+                policy_logic = self._build_policy_logic(
+                    policy, action, resource, ctx, least_privilege
+                )
+                self.solver.reset()
+                self.solver.add(policy_logic)
+                outcome = self.solver.check()
             if outcome == sat:
                 return VerificationResult(
                     verified=True,
@@ -531,7 +624,7 @@ class IamGuard:
                 allowed=False,
                 error="Z3 returned unknown",
             )
-        except UnverifiablePolicyError as exc:
+        except (UnverifiablePolicyError, CannotEvaluate) as exc:
             return VerificationResult(verified=False, allowed=False, error=exc.reason)
         except Exception as exc:  # noqa: BLE001
             # Record the exception type only: its message or a traceback can
@@ -546,8 +639,14 @@ class IamGuard:
         """
         Prove that the policy does NOT allow full admin access ("*" on "*").
         Returns allowed=True if the policy IS over-privileged (violation).
+
+        The question is whether any request context reaches full access, so
+        a conditional Allow is counted as applying, and a Deny counts only
+        when it is unconditional and names every action and every resource
+        with a pattern made of "*" alone. A conditional guard-rail such as
+        "deny without MFA" does not make an admin policy compliant.
         """
-        return self.verify_access(
+        return self._verify(
             policy,
             action="*",
             resource="*",
@@ -555,6 +654,7 @@ class IamGuard:
                 "aws:SourceIp": "0.0.0.0",
                 "aws:CurrentTime": "2100-01-01T00:00:00Z",
             },
+            least_privilege=True,
         )
 
     @staticmethod

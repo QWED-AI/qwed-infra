@@ -3,7 +3,15 @@ Comprehensive IAM Guard tests for SonarCloud 80%+ coverage.
 Tests all class methods using Z3 satisfiability assertions where appropriate.
 """
 import pytest
-from z3 import Solver, StringVal, sat, unsat
+from z3 import Solver, sat, unsat
+from qwed_infra.guards._iam_matching import (
+    CannotEvaluate,
+    MatchContext,
+    evaluate_condition,
+    evaluate_entry,
+    match_action,
+    wildcard_match,
+)
 from qwed_infra.guards.iam_guard import IamGuard
 
 
@@ -35,192 +43,177 @@ def _solve_unsat(constraint) -> bool:
 
 
 # ------------------------------------------------------------------
-# _match_pattern — tested via Z3 sat/unsat
+# wildcard matching — tested via Z3 sat/unsat
 # ------------------------------------------------------------------
 
 class TestMatchPattern:
-    def test_wildcard_star_always_matches(self, guard):
-        assert guard._match_pattern(StringVal("anything"), "*") is True
+    def test_wildcard_star_always_matches(self):
+        assert wildcard_match("anything", "*") is True
 
-    def test_prefix_wildcard_matches(self, guard):
-        constraint = guard._match_pattern(StringVal("s3:GetObject"), "s3:*")
-        assert _solve(constraint)
+    def test_prefix_wildcard_matches(self):
+        assert _solve(wildcard_match("s3:GetObject", "s3:*"))
 
-    def test_prefix_wildcard_no_match(self, guard):
-        constraint = guard._match_pattern(StringVal("ec2:StartInstances"), "s3:*")
-        assert _solve_unsat(constraint)
+    def test_prefix_wildcard_no_match(self):
+        assert _solve_unsat(wildcard_match("ec2:StartInstances", "s3:*"))
 
-    def test_suffix_wildcard_matches(self, guard):
-        constraint = guard._match_pattern(StringVal("prod-bucket"), "*-bucket")
-        assert _solve(constraint)
+    def test_suffix_wildcard_matches(self):
+        assert _solve(wildcard_match("prod-bucket", "*-bucket"))
 
-    def test_suffix_wildcard_no_match(self, guard):
-        constraint = guard._match_pattern(StringVal("prod-table"), "*-bucket")
-        assert _solve_unsat(constraint)
+    def test_suffix_wildcard_no_match(self):
+        assert _solve_unsat(wildcard_match("prod-table", "*-bucket"))
 
-    def test_exact_match(self, guard):
-        constraint = guard._match_pattern(StringVal("s3:GetObject"), "s3:GetObject")
-        assert _solve(constraint)
+    def test_exact_match(self):
+        assert _solve(wildcard_match("s3:GetObject", "s3:GetObject"))
 
-    def test_exact_no_match(self, guard):
-        constraint = guard._match_pattern(StringVal("s3:PutObject"), "s3:GetObject")
-        assert _solve_unsat(constraint)
+    def test_exact_no_match(self):
+        assert _solve_unsat(wildcard_match("s3:PutObject", "s3:GetObject"))
 
-    def test_interior_wildcard(self, guard):
-        constraint = guard._match_pattern(StringVal("s3:GetObject"), "s3:*Object")
-        assert _solve(constraint)
+    def test_interior_wildcard(self):
+        assert _solve(wildcard_match("s3:GetObject", "s3:*Object"))
 
-    def test_interior_wildcard_no_match(self, guard):
-        constraint = guard._match_pattern(StringVal("s3:CreateBucket"), "s3:*Object")
-        assert _solve_unsat(constraint)
+    def test_interior_wildcard_no_match(self):
+        assert _solve_unsat(wildcard_match("s3:CreateBucket", "s3:*Object"))
 
+    def test_question_mark_is_one_character(self):
+        assert _solve(wildcard_match("bucket1", "bucket?"))
+        assert _solve_unsat(wildcard_match("bucket", "bucket?"))
+        assert _solve_unsat(wildcard_match("bucket12", "bucket?"))
 
-# ------------------------------------------------------------------
-# _cidr_to_prefix
-# ------------------------------------------------------------------
+    def test_star_matches_non_ascii(self):
+        assert _solve(wildcard_match("b/ключ", "b/*"))
+        assert _solve(wildcard_match("b/\U0001F600", "b/?"))
+
+    def test_action_match_ignores_case(self):
+        assert _solve(match_action("s3:GetObject", "S3:getobject"))
+
 
 # ------------------------------------------------------------------
 # Non-octet CIDR regression tests (/12, /20 edge cases)
 # ------------------------------------------------------------------
 
+def _ev(operator, ctx_val, required):
+    """Evaluate one condition entry on key "k" (absent when ctx_val is None)."""
+    context = {} if ctx_val is None else {"k": ctx_val}
+    return evaluate_entry(operator, "k", required, MatchContext(context, variables=False))
+
+
 class TestNonOctetCidr:
     """Regression tests for CIDR masks not divisible by 8 (e.g. /12, /20)."""
 
-    def test_ip_address_slash12_in_range(self, guard):
-        # 10.0.0.0/12 covers 10.0.0.0 – 10.15.255.255
-        result = guard._apply_ip_address("10.5.1.1", "10.0.0.0/12", True)
-        assert result is not False and result is not True  # Z3 expr — satisfiable
+    def test_ip_address_slash12_in_range(self):
+        assert _solve(_ev("IpAddress", "10.5.1.1", "10.0.0.0/12"))
 
-    def test_ip_address_slash12_out_of_range(self, guard):
-        # 10.200.1.1 is outside 10.0.0.0/12 — constraint must be unsatisfiable
-        result = guard._apply_ip_address("10.200.1.1", "10.0.0.0/12", True)
-        assert _solve_unsat(result)
+    def test_ip_address_slash12_out_of_range(self):
+        assert _solve_unsat(_ev("IpAddress", "10.200.1.1", "10.0.0.0/12"))
 
-    def test_ip_address_slash20_in_range(self, guard):
-        result = guard._apply_ip_address("10.0.17.5", "10.0.16.0/20", True)
-        assert result is not False and result is not True  # Z3 expr — satisfiable
+    def test_ip_address_slash20_in_range(self):
+        assert _solve(_ev("IpAddress", "10.0.17.5", "10.0.16.0/20"))
 
-    def test_invalid_ip_returns_false(self, guard):
-        assert guard._apply_ip_address("not-an-ip", "10.0.0.0/8", True) is False
+    def test_invalid_ip_cannot_be_evaluated(self):
+        with pytest.raises(CannotEvaluate):
+            _ev("IpAddress", "not-an-ip", "10.0.0.0/8")
 
-    def test_not_ip_address_slash12_outside_allowed(self, guard):
-        # 10.200.1.1 is NOT in 10.0.0.0/12 → NotIpAddress should succeed (non-False)
-        result = guard._apply_not_ip_address("10.200.1.1", "10.0.0.0/12", True)
-        assert result is not False and result is not True  # Z3 expr — satisfiable
+    def test_not_ip_address_slash12_outside_allowed(self):
+        assert _solve(_ev("NotIpAddress", "10.200.1.1", "10.0.0.0/12"))
 
-    def test_not_ip_address_slash12_inside_denied(self, guard):
-        # 10.5.1.1 IS in 10.0.0.0/12 → NotIpAddress must be unsatisfiable
-        result = guard._apply_not_ip_address("10.5.1.1", "10.0.0.0/12", True)
-        assert _solve_unsat(result)
+    def test_not_ip_address_slash12_inside_denied(self):
+        assert _solve_unsat(_ev("NotIpAddress", "10.5.1.1", "10.0.0.0/12"))
 
 
 # ------------------------------------------------------------------
-# _apply_* operator methods
+# condition operators
 # ------------------------------------------------------------------
 
 class TestApplyOperators:
-    def test_string_equals_match(self, guard):
-        assert _solve(guard._apply_string_equals("hello", "hello", True))
+    def test_string_equals_match(self):
+        assert _solve(_ev("StringEquals", "hello", "hello"))
 
-    def test_string_equals_none_ctx(self, guard):
-        assert guard._apply_string_equals(None, "hello", True) is False
+    def test_string_equals_absent_key_is_false(self):
+        assert _ev("StringEquals", None, "hello") is False
 
-    def test_string_equals_mismatch(self, guard):
-        assert _solve_unsat(guard._apply_string_equals("world", "hello", True))
+    def test_string_equals_mismatch(self):
+        assert _solve_unsat(_ev("StringEquals", "world", "hello"))
 
-    def test_string_like_prefix_match(self, guard):
-        assert _solve(guard._apply_string_like("jdoe-admin", "jdoe-*", True))
+    def test_string_like_prefix_match(self):
+        assert _solve(_ev("StringLike", "jdoe-admin", "jdoe-*"))
 
-    def test_string_like_no_match(self, guard):
-        assert _solve_unsat(guard._apply_string_like("alice", "jdoe-*", True))
+    def test_string_like_no_match(self):
+        assert _solve_unsat(_ev("StringLike", "alice", "jdoe-*"))
 
-    def test_string_like_none_ctx(self, guard):
-        assert guard._apply_string_like(None, "jdoe-*", True) is False
+    def test_string_like_absent_key_is_false(self):
+        assert _ev("StringLike", None, "jdoe-*") is False
 
-    def test_ip_address_cidr(self, guard):
-        assert _solve(guard._apply_ip_address("192.168.1.55", "192.168.1.0/24", True))
+    def test_ip_address_cidr(self):
+        assert _solve(_ev("IpAddress", "192.168.1.55", "192.168.1.0/24"))
 
-    def test_ip_address_out_of_range(self, guard):
-        assert _solve_unsat(guard._apply_ip_address("10.0.0.1", "192.168.1.0/24", True))
+    def test_ip_address_out_of_range(self):
+        assert _solve_unsat(_ev("IpAddress", "10.0.0.1", "192.168.1.0/24"))
 
-    def test_ip_address_exact(self, guard):
-        assert _solve(guard._apply_ip_address("10.0.0.1", "10.0.0.1", True))
+    def test_ip_address_exact(self):
+        assert _solve(_ev("IpAddress", "10.0.0.1", "10.0.0.1"))
 
-    def test_ip_address_none_ctx(self, guard):
-        assert guard._apply_ip_address(None, "10.0.0.0/8", True) is False
+    def test_ip_address_absent_key_is_false(self):
+        assert _ev("IpAddress", None, "10.0.0.0/8") is False
 
-    def test_not_ip_address_outside_range(self, guard):
-        # 192.168.1.1 is NOT in 10.0.0.0/8 → should be allowed
-        assert _solve(guard._apply_not_ip_address("192.168.1.1", "10.0.0.0/8", True))
+    def test_not_ip_address_outside_range(self):
+        assert _solve(_ev("NotIpAddress", "192.168.1.1", "10.0.0.0/8"))
 
-    def test_not_ip_address_inside_range_denied(self, guard):
-        # 10.0.5.1 IS in 10.0.0.0/8 → NotIpAddress should deny
-        assert _solve_unsat(guard._apply_not_ip_address("10.0.5.1", "10.0.0.0/8", True))
+    def test_not_ip_address_inside_range_denied(self):
+        assert _solve_unsat(_ev("NotIpAddress", "10.0.5.1", "10.0.0.0/8"))
 
-    def test_not_ip_address_none_ctx(self, guard):
-        assert guard._apply_not_ip_address(None, "10.0.0.1", True) is False
+    def test_not_ip_address_absent_key_is_true(self):
+        # AWS: a negated operator is true when the key is absent.
+        assert _ev("NotIpAddress", None, "10.0.0.1") is True
 
-
-# ------------------------------------------------------------------
-# _evaluate_operator dispatch and fail-closed behavior
-# ------------------------------------------------------------------
 
 class TestEvaluateOperator:
-    def test_string_equals_dispatch(self, guard):
-        result = guard._evaluate_operator("StringEquals", "foo", "foo", True)
-        assert _solve(result)
+    def test_string_equals_dispatch(self):
+        assert _solve(_ev("StringEquals", "foo", "foo"))
 
-    def test_string_like_dispatch(self, guard):
-        result = guard._evaluate_operator("StringLike", "s3:GetObject", "s3:*", True)
-        assert _solve(result)
+    def test_string_like_dispatch(self):
+        assert _solve(_ev("StringLike", "s3:GetObject", "s3:*"))
 
-    def test_ip_address_dispatch(self, guard):
-        result = guard._evaluate_operator("IpAddress", "10.0.0.5", "10.0.0.0/8", True)
-        assert _solve(result)
+    def test_ip_address_dispatch(self):
+        assert _solve(_ev("IpAddress", "10.0.0.5", "10.0.0.0/8"))
 
-    def test_not_ip_address_dispatch(self, guard):
-        result = guard._evaluate_operator("NotIpAddress", "1.2.3.4", "5.0.0.0/8", True)
-        assert _solve(result)
+    def test_not_ip_address_dispatch(self):
+        assert _solve(_ev("NotIpAddress", "1.2.3.4", "5.0.0.0/8"))
 
-    def test_date_less_than_satisfied(self, guard):
-        result = guard._evaluate_operator("DateLessThan", "2025-01-01T00:00:00Z", "2026-01-01T00:00:00Z", True)
-        assert result is not False  # Date is before limit — condition passes
+    def test_date_less_than_satisfied(self):
+        assert _solve(_ev("DateLessThan", "2025-01-01T00:00:00Z", "2026-01-01T00:00:00Z"))
 
-    def test_date_less_than_fails(self, guard):
-        result = guard._evaluate_operator("DateLessThan", "2027-01-01T00:00:00Z", "2026-01-01T00:00:00Z", True)
-        assert result is False  # Date exceeds limit — fail closed
+    def test_date_less_than_fails(self):
+        assert _ev("DateLessThan", "2027-01-01T00:00:00Z", "2026-01-01T00:00:00Z") is False
 
-    def test_date_less_than_mixed_timezone_fails_closed(self, guard):
-        # naive vs aware datetime comparison previously raised TypeError — must fail closed
-        result = guard._apply_date_less_than("2025-01-01T00:00:00", "2026-01-01T00:00:00+00:00", True)
-        assert result is False  # TypeError → fail closed, not crash
+    def test_date_time_without_zone_cannot_be_evaluated(self):
+        with pytest.raises(CannotEvaluate):
+            _ev("DateLessThan", "2025-01-01T00:00:00", "2026-01-01T00:00:00+00:00")
 
-    def test_date_less_than_malformed_fails_closed(self, guard):
-        result = guard._apply_date_less_than("not-a-date", "2026-01-01T00:00:00Z", True)
-        assert result is False  # ValueError → fail closed
+    def test_malformed_date_cannot_be_evaluated(self):
+        with pytest.raises(CannotEvaluate):
+            _ev("DateLessThan", "not-a-date", "2026-01-01T00:00:00Z")
 
-    def test_unknown_operator_fails_closed(self, guard):
-        result = guard._evaluate_operator("SomeUnknownOp", "val", "req", True)
-        assert result is False  # Unknown op must fail closed
+    def test_unknown_operator_cannot_be_evaluated(self):
+        with pytest.raises(CannotEvaluate):
+            _ev("SomeUnknownOp", "val", "req")
 
 
 # ------------------------------------------------------------------
-# _evaluate_condition
+# evaluate_condition
 # ------------------------------------------------------------------
 
 class TestEvaluateCondition:
-    def test_empty_condition_returns_true(self, guard):
-        assert guard._evaluate_condition({}, {}) is True
+    def test_empty_condition_returns_true(self):
+        assert evaluate_condition({}, MatchContext({}, variables=False)) is True
 
-    def test_string_equals_condition_match(self, guard):
+    def test_string_equals_condition_match(self):
         block = {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
-        result = guard._evaluate_condition(block, {"aws:RequestedRegion": "us-east-1"})
-        assert _solve(result)
+        ctx = MatchContext({"aws:RequestedRegion": "us-east-1"}, variables=False)
+        assert _solve(evaluate_condition(block, ctx))
 
-    def test_missing_context_key_returns_false(self, guard):
+    def test_missing_context_key_returns_false(self):
         block = {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
-        result = guard._evaluate_condition(block, {})
-        assert result is False
+        assert evaluate_condition(block, MatchContext({}, variables=False)) is False
 
 
 # ------------------------------------------------------------------
