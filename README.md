@@ -44,7 +44,7 @@ AI agents like **Devin**, **GitHub Copilot Workspace**, and **Cursor** are writi
 *   **A Deterministic Verification Engine:** Uses the **Z3 Theorem Prover** to combine IAM statements under Deny precedence. Wildcard matching and conditions on the concrete request are decided deterministically in Python and enter the proof as constants.
 *   **A Graph Analyzer:** Uses **NetworkX** to map and verify network reachability (Reachability Analysis).
 *   **An Artifact Boundary Gate:** Scans release packages for secrets, debug artifacts, and misconfigured build paths — blocks unsafe releases before they ship.
-*   **Deterministic:** Inputs are code; the same input always gives the same verdict: `VERIFIED`, `BLOCKED` or `UNVERIFIABLE`, never a guess.
+*   **Deterministic:** Inputs are code; the same input gives the same verdict: `VERIFIED`, `BLOCKED` or `UNVERIFIABLE`, never a guess. An attestation token is checked against its expiry and revocation state when it is evaluated, so a `VERIFIED` result can become `BLOCKED` later: do not cache a `VERIFIED` verdict as permanent authorisation.
 *   **A "Guard" Layer:** Plugs into CI/CD to block AI-generated PRs that violate rules.
 
 ### ❌ QWED-Infra is NOT:
@@ -322,7 +322,7 @@ A: We use public On-Demand pricing for "Worst Case" estimation. If you have Ente
 *   ✅ **v0.1.0:** IAM Z3 Logic, Basic Network Graph, Static Cost Catalog. (Released Jan 2025)
 *   ✅ **v0.2.0:** Fail-closed parser + IAM, NetworkGuard CIDR fix, CI fail-open removal, diagnostic port (audit.py/InfraDiagnosticResult), CostGuard Decimal/unknown types, ArtifactBoundaryGuard.
 *   ✅ **v0.3.0:** Verification Context v1.0 across all four guards (bridge, `to_verification_context()` adapters, conformance suite) + attestation trust boundary — ES256-signed receipts bound to the exact claim and evidence gate every ADMIT.
-*   ✅ **v0.4.0:** Fail-closed hardening across the guards: IamGuard follows AWS matching and condition semantics (three-outcome conditions, least privilege judged from patterns), NetworkGuard models an explicit topology, CostGuard prices exactly and records every unmodelled declaration, ArtifactBoundaryGuard checks every hatchling input it knows can change the wheel, and the publish workflow builds from hash-pinned tools. (Current)
+*   ✅ **v0.4.0:** Fail-closed hardening across the guards: IamGuard follows AWS matching and condition semantics (three-outcome conditions, least privilege judged from patterns), NetworkGuard models an explicit topology, CostGuard prices exactly and blocks on every unmodelled declaration the parser records (callers that build resource dictionaries themselves must list unsupported declarations in `unmodelled`), ArtifactBoundaryGuard checks every hatchling input it knows can change the wheel, and the publish workflow builds from hash-pinned tools. (Current)
 *   🔮 Next: Docker/deployment artifact verification, K8s manifest support, Azure provider.
 
 ---
