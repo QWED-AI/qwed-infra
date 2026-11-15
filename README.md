@@ -407,6 +407,8 @@ Thanks to everyone building QWED. [See all contributors →](https://github.com/
 
 Apache 2.0 - Open Source.
 
+Redistributions keep the attribution in [NOTICE](NOTICE), and [TRADEMARKS.md](TRADEMARKS.md) says how the QWED name and logo may be used.
+
 <div align="center">
   <b>Safe Infrastructure is Scalable Infrastructure.</b><br>
   Built by <a href="https://github.com/QWED-AI">QWED-AI</a>
